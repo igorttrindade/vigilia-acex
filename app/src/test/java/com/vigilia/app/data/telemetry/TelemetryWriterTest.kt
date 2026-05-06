@@ -44,7 +44,7 @@ class TelemetryWriterTest {
             blinkRate = 12.0f,
             isYawning = false,
             isFaceDetected = true,
-            alertActive = true
+            alertActive = true,
         )
         
         telemetryWriter.writeRecord(record)
