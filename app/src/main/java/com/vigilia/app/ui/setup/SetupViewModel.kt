@@ -26,6 +26,7 @@ data class SetupUiState(
  * ViewModel for the Setup screen.
  * Responsible for managing permissions and monitoring configuration.
  */
+@Suppress("unused")
 class SetupViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _uiState = MutableStateFlow(SetupUiState())

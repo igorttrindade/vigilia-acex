@@ -29,6 +29,7 @@ data class MonitoringUiState(
  * ViewModel for the Monitoring screen.
  * Collects real-time data from the MonitoringService.
  */
+@Suppress("unused")
 class MonitoringViewModel : ViewModel() {
 
     private val _uiState = MutableStateFlow(MonitoringUiState())

@@ -26,6 +26,7 @@ data class HistoryUiState(
  * ViewModel for the History screen.
  * Responsible for loading session summaries and exporting session data.
  */
+@Suppress("unused")
 class HistoryViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = SessionRepository(application)

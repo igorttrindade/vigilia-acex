@@ -20,6 +20,7 @@ sealed class Screen(val route: String) {
  * @param navController The navigation controller used to handle transitions.
  */
 @Composable
+@Suppress("unused")
 fun VigiliaNavGraph(navController: NavHostController) {
     NavHost(
         navController = navController,
