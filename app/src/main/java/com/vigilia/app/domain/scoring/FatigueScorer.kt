@@ -1,5 +1,6 @@
 package com.vigilia.app.domain.scoring
 
+import android.util.Log
 import com.vigilia.app.domain.model.FatigueAssessment
 import com.vigilia.app.domain.model.FatigueMetrics
 import com.vigilia.app.domain.model.FatigueState
@@ -12,7 +13,7 @@ import java.util.ArrayDeque
  * and assess the user's fatigue state using computer vision signals.
  *
  * Key metrics used:
- * - PERCLOS (Percentage of Eye Closure): Calculated over a 30-second rolling window.
+ * - PERCLOS (Percentage of Eye Closure): Calculated over a 20-second rolling window.
  * - Blink Rate: Tracked over a 60-second rolling window.
  * - Yawn Detection: Sustained mouth opening for at least 2 seconds.
  *
@@ -22,13 +23,13 @@ import java.util.ArrayDeque
 class FatigueScorer {
 
     private companion object {
-        const val PERCLOS_WINDOW_MS = 30_000L
+        const val PERCLOS_WINDOW_MS = 20_000L
         const val BLINK_WINDOW_MS = 60_000L
         const val YAWN_THRESHOLD_PROB = 0.7f
         const val YAWN_DURATION_MS = 2_000L
         const val YAWN_RESET_MS = 5_000L
         const val EYE_CLOSED_THRESHOLD = 0.2f
-        const val EYE_OPEN_THRESHOLD = 0.5f
+        const val EYE_OPEN_THRESHOLD = 0.4f
         const val SMOOTHING_ALPHA = 0.3f
 
         const val SCORE_WEIGHT_PERCLOS = 50f
@@ -41,10 +42,10 @@ class FatigueScorer {
         const val BLINK_DEVIATION_LIMIT_HIGH = 25f
 
         const val TRANSITION_NORMAL_TO_WARNING_SCORE = 40f
-        const val TRANSITION_NORMAL_TO_WARNING_MS = 3_000L
+        const val TRANSITION_NORMAL_TO_WARNING_MS = 2_000L
 
         const val TRANSITION_WARNING_TO_FATIGUED_SCORE = 70f
-        const val TRANSITION_WARNING_TO_FATIGUED_MS = 5_000L
+        const val TRANSITION_WARNING_TO_FATIGUED_MS = 4_000L
 
         const val TRANSITION_WARNING_TO_NORMAL_SCORE = 25f
         const val TRANSITION_WARNING_TO_NORMAL_MS = 10_000L
@@ -148,6 +149,8 @@ class FatigueScorer {
         } else {
             (SMOOTHING_ALPHA * rawScore) + (1f - SMOOTHING_ALPHA) * smoothedScore
         }
+
+        Log.d("FatigueScorer", "score=$smoothedScore state=$currentState perclos=$perclos blinkRate=$blinkRate yawning=$isCurrentlyYawning")
 
         // 5. State Machine with Hysteresis
         updateState(smoothedScore, currentTime)

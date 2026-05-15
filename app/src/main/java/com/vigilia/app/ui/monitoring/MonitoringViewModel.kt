@@ -102,9 +102,18 @@ class MonitoringViewModel : ViewModel() {
     }
 
     /**
+     * Starts the monitoring session.
+     */
+    fun startMonitoring(context: Context) {
+        ServiceController.startMonitoring(context)
+    }
+
+    /**
      * Stops the active monitoring session.
      */
     fun stopMonitoring(context: Context) {
         ServiceController.stopMonitoring(context)
+        stopTimer()
+        _uiState.update { it.copy(isMonitoringActive = false) }
     }
 }

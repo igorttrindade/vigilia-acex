@@ -53,8 +53,8 @@ class TelemetryWriterTest {
         assertEquals(sessionId, summary.sessionId)
         assertEquals(45.0f, summary.averageScore, 0.01f)
         assertEquals(1, summary.totalAlerts)
-        assertEquals(1000L, summary.startTime)
-        assertEquals(1000L, summary.endTime)
+        assertTrue("startTime should be a real wall-clock timestamp", summary.startTime > 0L)
+        assertTrue("endTime should be >= startTime", summary.endTime >= summary.startTime)
         
         val summaryFile = File(sessionDir, "session_summary.json")
         assertTrue("Summary file should exist", summaryFile.exists())

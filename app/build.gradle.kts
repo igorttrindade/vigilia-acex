@@ -5,11 +5,12 @@ plugins {
 
 android {
     namespace = "com.vigilia.app"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.vigilia.app"
         minSdk = 26
+        //noinspection OldTargetApi
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
@@ -33,6 +34,9 @@ android {
     buildFeatures {
         compose = true
     }
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
@@ -44,6 +48,8 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
+    //noinspection UseTomlInstead
+    implementation("androidx.compose.material:material-icons-extended")
 
     // CameraX
     implementation(libs.camerax.core)

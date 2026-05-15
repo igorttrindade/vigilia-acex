@@ -19,7 +19,7 @@ import java.util.UUID
  */
 class TelemetryWriter private constructor(
     @Suppress("unused") private val context: Context?,
-    private val baseDir: File
+    private val baseDir: File,
 ) {
 
     /**
@@ -38,8 +38,7 @@ class TelemetryWriter private constructor(
     private var csvFile: File? = null
 
     // Session metrics tracked in memory
-    private var startTime: Long = 0
-    private var lastTimestamp: Long = 0
+    private var startTimeMillis: Long = 0
     private var totalAlerts: Int = 0
     private var scoreSum: Double = 0.0
     private var recordCount: Long = 0
@@ -68,8 +67,7 @@ class TelemetryWriter private constructor(
         csvFile = file
 
         // Reset metrics
-        startTime = 0
-        lastTimestamp = 0
+        startTimeMillis = System.currentTimeMillis()
         totalAlerts = 0
         scoreSum = 0.0
         recordCount = 0
@@ -106,10 +104,6 @@ class TelemetryWriter private constructor(
             }
 
             // Update metrics for summary
-            if (recordCount == 0L) {
-                startTime = record.timestamp
-            }
-            lastTimestamp = record.timestamp
             if (record.alertActive) {
                 totalAlerts++
             }
@@ -134,14 +128,15 @@ class TelemetryWriter private constructor(
         val sessionId = currentSessionId ?: throw IllegalStateException("No active session to stop")
         val folder = sessionFolder ?: throw IllegalStateException("Session folder is missing")
 
-        val durationMs = if (recordCount > 0) lastTimestamp - startTime else 0L
+        val endTimeMillis = System.currentTimeMillis()
+        val durationMs = if (startTimeMillis > 0) endTimeMillis - startTimeMillis else 0L
         val avgScore = if (recordCount > 0) (scoreSum / recordCount).toFloat() else 0f
         val dominantState = stateCounts.maxByOrNull { it.value }?.key ?: FatigueState.NORMAL
 
         val summary = SessionSummary(
             sessionId = sessionId,
-            startTime = startTime,
-            endTime = lastTimestamp,
+            startTime = startTimeMillis,
+            endTime = endTimeMillis,
             durationMs = durationMs,
             totalAlerts = totalAlerts,
             dominantState = dominantState,

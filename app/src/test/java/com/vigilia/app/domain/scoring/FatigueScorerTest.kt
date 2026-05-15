@@ -89,14 +89,14 @@ class FatigueScorerTest {
         }
         
         val startTransitionTime = currentTime
-        // Sustained for 2.9s
-        while (currentTime - startTransitionTime < 2900L) {
+        // Sustained for 1.9s
+        while (currentTime - startTransitionTime < 1900L) {
             assertEquals(FatigueState.NORMAL, scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, currentTime)).fatigueState)
             currentTime += 100
         }
-        
-        // Now reach 3s
-        currentTime = startTransitionTime + 3000L
+
+        // Now reach 2s
+        currentTime = startTransitionTime + 2000L
         assertEquals(FatigueState.WARNING, scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, currentTime)).fatigueState)
     }
 
@@ -115,14 +115,14 @@ class FatigueScorerTest {
         }
         
         val startTransitionTime = currentTime
-        // Sustained for 4.9s
-        while (currentTime - startTransitionTime < 4900L) {
+        // Sustained for 3.9s
+        while (currentTime - startTransitionTime < 3900L) {
             assertEquals(FatigueState.WARNING, scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.8f, true, currentTime)).fatigueState)
             currentTime += 100
         }
-        
-        // Now reach 5s
-        currentTime = startTransitionTime + 5000L
+
+        // Now reach 4s
+        currentTime = startTransitionTime + 4000L
         assertEquals(FatigueState.FATIGUED, scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.8f, true, currentTime)).fatigueState)
     }
 
