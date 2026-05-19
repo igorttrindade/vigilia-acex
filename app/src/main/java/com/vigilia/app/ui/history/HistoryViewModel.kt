@@ -60,7 +60,7 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /**
-     * Triggers the Android ShareSheet to export session data (CSV and JSON).
+     * Triggers the Android ShareSheet to export the session CSV file.
      *
      * @param sessionId The ID of the session to export.
      */
@@ -69,24 +69,18 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
             val folder = repository.getSessionFolder(sessionId)
             if (!folder.exists()) return
 
-            val files = folder.listFiles()?.filter { it.isFile } ?: return
-            if (files.isEmpty()) return
+            val csvFile = folder.listFiles()?.firstOrNull { it.extension == "csv" } ?: return
 
-            val uris = ArrayList(files.map { file ->
-                FileProvider.getUriForFile(
-                    getApplication(),
-                    "com.vigilia.app.fileprovider",
-                    file,
-                )
-            })
+            val uri = FileProvider.getUriForFile(
+                getApplication(),
+                "com.vigilia.app.fileprovider",
+                csvFile,
+            )
 
-            val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-                type = "text/*"
-                putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
-                // ClipData required on API 29+ for permission grants to propagate
-                clipData = ClipData.newRawUri(null, uris[0]).also { clip ->
-                    uris.drop(1).forEach { uri -> clip.addItem(ClipData.Item(uri)) }
-                }
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/csv"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                clipData = ClipData.newRawUri(null, uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
 
