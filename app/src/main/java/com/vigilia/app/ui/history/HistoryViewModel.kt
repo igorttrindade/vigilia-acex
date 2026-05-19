@@ -1,7 +1,9 @@
 package com.vigilia.app.ui.history
 
 import android.app.Application
+import android.content.ClipData
 import android.content.Intent
+import android.util.Log
 import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -60,30 +62,39 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
      * @param sessionId The ID of the session to export.
      */
     fun exportSession(sessionId: String) {
-        val folder = repository.getSessionFolder(sessionId)
-        if (!folder.exists()) return
+        try {
+            val folder = repository.getSessionFolder(sessionId)
+            if (!folder.exists()) return
 
-        val files = folder.listFiles() ?: return
-        if (files.isEmpty()) return
+            val files = folder.listFiles()?.filter { it.isFile } ?: return
+            if (files.isEmpty()) return
 
-        val uris = ArrayList(files.map { file ->
-            FileProvider.getUriForFile(
-                getApplication(),
-                "com.vigilia.app.fileprovider",
-                file,
-            )
-        })
+            val uris = ArrayList(files.map { file ->
+                FileProvider.getUriForFile(
+                    getApplication(),
+                    "com.vigilia.app.fileprovider",
+                    file,
+                )
+            })
 
-        val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-            type = "text/*"
-            putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                type = "text/*"
+                putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                // ClipData required on API 29+ for permission grants to propagate
+                clipData = ClipData.newRawUri(null, uris[0]).also { clip ->
+                    uris.drop(1).forEach { uri -> clip.addItem(ClipData.Item(uri)) }
+                }
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+
+            val shareIntent = Intent.createChooser(intent, "Exportar Sessão").apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+
+            getApplication<Application>().startActivity(shareIntent)
+        } catch (e: Exception) {
+            Log.e("HistoryViewModel", "Export failed", e)
         }
-
-        val shareIntent = Intent.createChooser(intent, "Exportar Sessão").apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        
-        getApplication<Application>().startActivity(shareIntent)
     }
 }

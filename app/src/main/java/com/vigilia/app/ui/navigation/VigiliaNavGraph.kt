@@ -1,7 +1,13 @@
 package com.vigilia.app.ui.navigation
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.MonitorHeart
@@ -10,6 +16,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -29,7 +36,6 @@ import com.vigilia.app.ui.monitoring.MonitoringViewModel
 import com.vigilia.app.ui.setup.SetupScreen
 import com.vigilia.app.ui.setup.SetupViewModel
 import com.vigilia.app.ui.theme.AccentAmber
-import com.vigilia.app.ui.theme.SurfaceDark
 
 sealed class Screen(val route: String, val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
     object Setup : Screen("setup", "Configurar", Icons.Default.Settings)
@@ -56,7 +62,7 @@ fun VigiliaNavGraph(navController: NavHostController) {
             if (isMonitoringActive) {
                 ActiveMonitoringBanner()
             }
-            
+
             NavHost(
                 navController = navController,
                 startDestination = Screen.Setup.route,
@@ -95,14 +101,21 @@ fun VigiliaBottomBar(navController: NavHostController) {
     val currentDestination = navBackStackEntry?.destination
 
     NavigationBar(
-        containerColor = SurfaceDark,
+        containerColor = Color(0xFF0F0F0F),
         contentColor = AccentAmber,
+        tonalElevation = 0.dp,
     ) {
         items.forEach { screen ->
+            val selected = currentDestination?.hierarchy?.any { it.route == screen.route } == true
             NavigationBarItem(
                 icon = { Icon(screen.icon, contentDescription = null) },
-                label = { Text(screen.label) },
-                selected = currentDestination?.hierarchy?.any { it.route == screen.route } == true,
+                label = {
+                    Text(
+                        text = screen.label,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                    )
+                },
+                selected = selected,
                 onClick = {
                     navController.navigate(screen.route) {
                         popUpTo(navController.graph.findStartDestination().id) {
@@ -113,11 +126,11 @@ fun VigiliaBottomBar(navController: NavHostController) {
                     }
                 },
                 colors = NavigationBarItemDefaults.colors(
-                    selectedIconColor = AccentAmber,
+                    selectedIconColor = Color(0xFF0A0A0A),
                     selectedTextColor = AccentAmber,
-                    unselectedIconColor = Color(0xFF9CA3AF),
-                    unselectedTextColor = Color(0xFF9CA3AF),
-                    indicatorColor = SurfaceDark,
+                    unselectedIconColor = Color(0xFF4B5563),
+                    unselectedTextColor = Color(0xFF4B5563),
+                    indicatorColor = AccentAmber,
                 ),
             )
         }
@@ -126,18 +139,38 @@ fun VigiliaBottomBar(navController: NavHostController) {
 
 @Composable
 fun ActiveMonitoringBanner() {
+    val infiniteTransition = rememberInfiniteTransition(label = "banner_dot")
+    val dotAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.3f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(700),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "dot_alpha",
+    )
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .background(AccentAmber)
-            .padding(vertical = 4.dp),
+            .background(Color(0xFF1A0F00))
+            .padding(vertical = 6.dp, horizontal = 16.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = "● Monitoramento ativo",
-            color = Color.Black,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Bold,
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .alpha(dotAlpha)
+                    .background(AccentAmber, CircleShape)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = "Monitoramento ativo",
+                color = AccentAmber,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
     }
 }
