@@ -5,12 +5,17 @@ import android.content.Context
 import android.content.ServiceConnection
 import android.os.IBinder
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -20,11 +25,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
@@ -136,6 +143,24 @@ fun MonitoringScreen(
 @Composable
 fun MonitoringOverlay(uiState: MonitoringUiState) {
     val assessment = uiState.assessment
+
+    var dismissedAtMs by rememberSaveable { mutableLongStateOf(0L) }
+    var tick by remember { mutableLongStateOf(0L) }
+
+    LaunchedEffect(dismissedAtMs) {
+        if (dismissedAtMs > 0L) {
+            kotlinx.coroutines.delay(60_000L)
+            tick = System.currentTimeMillis()
+        }
+    }
+
+    @Suppress("UNUSED_EXPRESSION")
+    tick
+
+    val now = System.currentTimeMillis()
+    val isDismissed = dismissedAtMs > 0L && (now - dismissedAtMs) < 60_000L
+    val showBanner = uiState.showPositioningWarning && !isDismissed
+
     Column(modifier = Modifier.fillMaxWidth().padding(24.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -144,6 +169,60 @@ fun MonitoringOverlay(uiState: MonitoringUiState) {
         ) {
             StatePill(state = assessment?.fatigueState ?: FatigueState.NO_FACE)
             ScoreIndicator(score = assessment?.score ?: 0f, state = assessment?.fatigueState ?: FatigueState.NO_FACE)
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        AnimatedVisibility(
+            visible = showBanner,
+            enter = slideInVertically { -it } + fadeIn(),
+            exit = slideOutVertically { -it } + fadeOut(),
+        ) {
+            PositioningWarningBanner(onDismiss = { dismissedAtMs = System.currentTimeMillis() })
+        }
+    }
+}
+
+@Composable
+fun PositioningWarningBanner(onDismiss: () -> Unit) {
+    Surface(
+        color = Color(0xFF1A1A1A).copy(alpha = 0.90f),
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, AccentAmber),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Default.Warning,
+                contentDescription = null,
+                tint = AccentAmber,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Celular mal posicionado",
+                    color = AccentAmber,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    text = "Aponte a câmera frontal para o seu rosto",
+                    color = AccentAmber.copy(alpha = 0.75f),
+                    fontSize = 12.sp,
+                )
+            }
+            IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Fechar",
+                    tint = AccentAmber,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
         }
     }
 }

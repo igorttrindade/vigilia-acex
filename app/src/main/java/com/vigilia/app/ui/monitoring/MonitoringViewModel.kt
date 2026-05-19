@@ -23,6 +23,7 @@ data class MonitoringUiState(
     val isMonitoringActive: Boolean = false,
     val elapsedTimeFormatted: String = "00:00:00",
     val alertCount: Int = 0,
+    val showPositioningWarning: Boolean = false,
 )
 
 /**
@@ -37,6 +38,11 @@ class MonitoringViewModel : ViewModel() {
 
     private var timerJob: Job? = null
     private var startTimeMillis: Long = 0
+
+    // Rolling 60-second window of (timestampMs, isFaceDetected) for positioning check
+    private val frameWindow = ArrayDeque<Pair<Long, Boolean>>()
+    private var consecutiveFaceStartMs: Long? = null
+    private var sessionStartMs: Long = 0L
 
     init {
         observeAssessment()
@@ -54,11 +60,13 @@ class MonitoringViewModel : ViewModel() {
                     stopTimer()
                 }
 
+                val positioningWarning = computePositioningWarning(assessment)
+
                 _uiState.update { state ->
                     val newAlertCount = if (
-                        assessment != null && 
+                        assessment != null &&
                         assessment.fatigueState != state.assessment?.fatigueState &&
-                        (assessment.fatigueState == com.vigilia.app.domain.model.FatigueState.WARNING || 
+                        (assessment.fatigueState == com.vigilia.app.domain.model.FatigueState.WARNING ||
                          assessment.fatigueState == com.vigilia.app.domain.model.FatigueState.FATIGUED)
                     ) {
                         state.alertCount + 1
@@ -70,14 +78,45 @@ class MonitoringViewModel : ViewModel() {
                         assessment = assessment,
                         isMonitoringActive = isActive,
                         alertCount = newAlertCount,
+                        showPositioningWarning = positioningWarning,
                     )
                 }
             }
         }
     }
 
+    private fun computePositioningWarning(assessment: FatigueAssessment?): Boolean {
+        if (assessment == null) return false
+
+        val now = System.currentTimeMillis()
+        frameWindow.addLast(now to assessment.isFaceDetected)
+        while (frameWindow.isNotEmpty() && now - frameWindow.first().first > 60_000L) {
+            frameWindow.removeFirst()
+        }
+
+        if (assessment.isFaceDetected) {
+            if (consecutiveFaceStartMs == null) consecutiveFaceStartMs = now
+        } else {
+            consecutiveFaceStartMs = null
+        }
+
+        val current = _uiState.value.showPositioningWarning
+
+        if (now - sessionStartMs < 30_000L || frameWindow.isEmpty()) return current
+
+        val consecutiveMs = consecutiveFaceStartMs
+        if (consecutiveMs != null && now - consecutiveMs >= 10_000L) return false
+
+        val noFaceCount = frameWindow.count { !it.second }
+        val ratio = noFaceCount.toFloat() / frameWindow.size
+        return if (ratio > 0.30f) true else current
+    }
+
     private fun startTimer() {
         startTimeMillis = System.currentTimeMillis()
+        sessionStartMs = startTimeMillis
+        frameWindow.clear()
+        consecutiveFaceStartMs = null
         timerJob?.cancel()
         timerJob = viewModelScope.launch {
             while (true) {
@@ -91,7 +130,9 @@ class MonitoringViewModel : ViewModel() {
     private fun stopTimer() {
         timerJob?.cancel()
         timerJob = null
-        _uiState.update { it.copy(elapsedTimeFormatted = "00:00:00") }
+        frameWindow.clear()
+        consecutiveFaceStartMs = null
+        _uiState.update { it.copy(elapsedTimeFormatted = "00:00:00", showPositioningWarning = false) }
     }
 
     private fun formatElapsedTime(millis: Long): String {
