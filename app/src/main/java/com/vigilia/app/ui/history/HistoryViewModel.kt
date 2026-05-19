@@ -36,7 +36,10 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
     val uiState: StateFlow<HistoryUiState> = _uiState.asStateFlow()
 
     init {
-        loadSessions()
+        viewModelScope.launch {
+            repository.deleteOldSessions()
+            loadSessions()
+        }
     }
 
     /**

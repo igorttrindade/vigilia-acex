@@ -1,6 +1,7 @@
 package com.vigilia.app.data.repository
 
 import android.content.Context
+import android.util.Log
 import com.vigilia.app.domain.model.FatigueState
 import com.vigilia.app.domain.model.SessionSummary
 import kotlinx.coroutines.Dispatchers
@@ -53,6 +54,30 @@ class SessionRepository private constructor(
         }
 
         summaries.sortedByDescending { it.startTime }
+    }
+
+    suspend fun deleteOldSessions(daysToKeep: Int = 60) = withContext(Dispatchers.IO) {
+        if (!baseDir.exists() || !baseDir.isDirectory) return@withContext
+
+        val cutoff = System.currentTimeMillis() - (daysToKeep * 24 * 60 * 60 * 1000L)
+        val folders = baseDir.listFiles()?.filter { it.isDirectory } ?: return@withContext
+
+        var deleted = 0
+        for (folder in folders) {
+            try {
+                val summaryFile = File(folder, "session_summary.json")
+                if (!summaryFile.exists()) continue
+                val startTime = extractLong(summaryFile.readText(), "startTime") ?: continue
+                if (startTime < cutoff) {
+                    folder.deleteRecursively()
+                    deleted++
+                }
+            } catch (e: Exception) {
+                Log.w("SessionRepository", "Auto-cleanup: skipping ${folder.name}", e)
+            }
+        }
+
+        Log.d("SessionRepository", "Auto-cleanup: deleted $deleted of ${folders.size} sessions older than $daysToKeep days")
     }
 
     /**
