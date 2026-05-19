@@ -17,6 +17,9 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -43,8 +46,11 @@ import java.util.*
 fun HistoryScreen(
     viewModel: HistoryViewModel,
 ) {
-    LaunchedEffect(Unit) {
-        viewModel.loadSessions()
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            viewModel.loadSessions()
+        }
     }
 
     val uiState by viewModel.uiState.collectAsState()
@@ -107,7 +113,9 @@ fun HistoryContent(
             }
             uiState.isEmpty -> {
                 Column(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {

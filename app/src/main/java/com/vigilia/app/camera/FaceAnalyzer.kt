@@ -58,11 +58,28 @@ class FaceAnalyzer(
                     val metrics = if (face != null) {
                         val noseBase = face.getLandmark(FaceLandmark.NOSE_BASE)
                         val mouthBottom = face.getLandmark(FaceLandmark.MOUTH_BOTTOM)
-                        val mouthOpenScore = if (noseBase != null && mouthBottom != null) {
-                            val distance = abs(noseBase.position.y - mouthBottom.position.y)
-                            val faceHeight = face.boundingBox.height().toFloat()
-                            (distance / faceHeight).coerceIn(0f, 1f)
-                        } else 0f
+                        val mouthLeft = face.getLandmark(FaceLandmark.MOUTH_LEFT)
+                        val mouthRight = face.getLandmark(FaceLandmark.MOUTH_RIGHT)
+
+                        Log.d("FaceAnalyzer", "landmarks available: " +
+                            "MOUTH_BOTTOM=${mouthBottom != null} " +
+                            "MOUTH_LEFT=${mouthLeft != null} " +
+                            "MOUTH_RIGHT=${mouthRight != null} " +
+                            "NOSE_BASE=${noseBase != null}")
+
+                        val faceHeight = face.boundingBox.height().toFloat()
+                        val mouthOpenScore = when {
+                            noseBase != null && mouthBottom != null -> {
+                                val distance = abs(noseBase.position.y - mouthBottom.position.y)
+                                (distance / faceHeight).coerceIn(0f, 1f)
+                            }
+                            noseBase != null && mouthLeft != null && mouthRight != null -> {
+                                val mouthCenterY = (mouthLeft.position.y + mouthRight.position.y) / 2f
+                                val distance = abs(noseBase.position.y - mouthCenterY)
+                                (distance / faceHeight).coerceIn(0f, 1f)
+                            }
+                            else -> 0f
+                        }
                         FatigueMetrics(
                             leftEyeOpenProbability = face.leftEyeOpenProbability ?: 0f,
                             rightEyeOpenProbability = face.rightEyeOpenProbability ?: 0f,
