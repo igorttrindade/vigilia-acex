@@ -20,12 +20,15 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import com.vigilia.app.camera.CameraManager
+import com.vigilia.app.data.repository.SyncRepository
 import com.vigilia.app.data.telemetry.TelemetryWriter
 import com.vigilia.app.domain.model.FatigueAssessment
 import com.vigilia.app.domain.model.FatigueState
 import com.vigilia.app.domain.model.TelemetryRecord
 import com.vigilia.app.domain.scoring.FatigueScorer
 import kotlinx.coroutines.*
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.util.Timer
 import java.util.TimerTask
@@ -253,6 +256,16 @@ class MonitoringService : Service(), LifecycleOwner {
                 telemetryWriter.stopSession()
             } catch (e: Exception) {
                 Log.e("MonitoringService", "Stop session failed", e)
+            }
+            try {
+                withTimeout(15_000L) {
+                    SyncRepository(this@MonitoringService).syncPendingSessions()
+                }
+                Log.i("MonitoringService", "Session sync completed")
+            } catch (e: TimeoutCancellationException) {
+                Log.w("MonitoringService", "Session sync timed out, will retry next time")
+            } catch (e: Exception) {
+                Log.w("MonitoringService", "Session sync failed, will retry next time", e)
             }
         }
         

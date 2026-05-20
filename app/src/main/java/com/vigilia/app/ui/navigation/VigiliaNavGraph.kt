@@ -28,7 +28,10 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
+import com.vigilia.app.data.repository.AuthRepository
 import com.vigilia.app.service.MonitoringService
+import com.vigilia.app.ui.auth.AuthScreen
+import com.vigilia.app.ui.auth.AuthViewModel
 import com.vigilia.app.ui.history.HistoryScreen
 import com.vigilia.app.ui.history.HistoryViewModel
 import com.vigilia.app.ui.monitoring.MonitoringScreen
@@ -43,15 +46,38 @@ sealed class Screen(val route: String, val label: String, val icon: androidx.com
     object History : Screen("history", "Histórico", Icons.Default.History)
 }
 
+private const val ROUTE_AUTH = "auth"
+
 @Composable
 @Suppress("unused")
 fun VigiliaNavGraph(navController: NavHostController) {
     val assessment by MonitoringService.currentAssessment.collectAsState()
     val isMonitoringActive = assessment != null
 
+    val authViewModel: AuthViewModel = viewModel()
+    val authUiState by authViewModel.uiState.collectAsState()
+
+    val navBackStackEntry by navController.currentBackStackEntryAsState()
+    val currentRoute = navBackStackEntry?.destination?.route
+
+    val startDestination = remember {
+        if (AuthRepository().isLoggedIn()) Screen.Setup.route else ROUTE_AUTH
+    }
+
+    // Navigate back to auth when the user logs out
+    LaunchedEffect(authUiState.isLoggedIn) {
+        if (!authUiState.isLoggedIn && currentRoute != null && currentRoute != ROUTE_AUTH) {
+            navController.navigate(ROUTE_AUTH) {
+                popUpTo(0) { inclusive = true }
+            }
+        }
+    }
+
     Scaffold(
         bottomBar = {
-            VigiliaBottomBar(navController = navController)
+            if (currentRoute != ROUTE_AUTH) {
+                VigiliaBottomBar(navController = navController)
+            }
         },
     ) { innerPadding ->
         Column(
@@ -59,15 +85,25 @@ fun VigiliaNavGraph(navController: NavHostController) {
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            if (isMonitoringActive) {
+            if (isMonitoringActive && currentRoute != ROUTE_AUTH) {
                 ActiveMonitoringBanner()
             }
 
             NavHost(
                 navController = navController,
-                startDestination = Screen.Setup.route,
+                startDestination = startDestination,
                 modifier = Modifier.weight(1f)
             ) {
+                composable(ROUTE_AUTH) {
+                    AuthScreen(
+                        viewModel = authViewModel,
+                        onAuthSuccess = {
+                            navController.navigate(Screen.Setup.route) {
+                                popUpTo(ROUTE_AUTH) { inclusive = true }
+                            }
+                        },
+                    )
+                }
                 composable(Screen.Setup.route) {
                     val setupViewModel: SetupViewModel = viewModel()
                     SetupScreen(
@@ -78,7 +114,8 @@ fun VigiliaNavGraph(navController: NavHostController) {
                                 launchSingleTop = true
                                 restoreState = true
                             }
-                        }
+                        },
+                        onLogout = { authViewModel.signOut() },
                     )
                 }
                 composable(Screen.Monitoring.route) {

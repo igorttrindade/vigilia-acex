@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
 }
 
 android {
@@ -65,6 +66,11 @@ dependencies {
 
     // Lifecycle
     implementation(libs.lifecycle.viewmodel)
+
+    // Supabase
+    implementation(libs.supabase.auth)
+    implementation(libs.supabase.postgrest)
+    implementation(libs.ktor.android)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

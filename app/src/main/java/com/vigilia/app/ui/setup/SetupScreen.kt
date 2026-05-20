@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Shield
@@ -42,6 +43,7 @@ import com.vigilia.app.ui.theme.*
 fun SetupScreen(
     viewModel: SetupViewModel,
     onMonitoringStarted: () -> Unit,
+    onLogout: () -> Unit = {},
 ) {
     val uiState by viewModel.uiState.collectAsState()
 
@@ -51,21 +53,36 @@ fun SetupScreen(
         viewModel.onPermissionsResult(permissions)
     }
 
-    SetupContent(
-        uiState = uiState,
-        onCalibrationToggled = viewModel::onCalibrationToggled,
-        onVideoToggled = viewModel::onVideoToggled,
-        onRequestPermissions = {
-            permissionLauncher.launch(
-                arrayOf(
-                    android.Manifest.permission.CAMERA,
-                    android.Manifest.permission.ACCESS_COARSE_LOCATION,
-                ),
+    Box(modifier = Modifier.fillMaxSize()) {
+        SetupContent(
+            uiState = uiState,
+            onCalibrationToggled = viewModel::onCalibrationToggled,
+            onVideoToggled = viewModel::onVideoToggled,
+            onRequestPermissions = {
+                permissionLauncher.launch(
+                    arrayOf(
+                        android.Manifest.permission.CAMERA,
+                        android.Manifest.permission.ACCESS_COARSE_LOCATION,
+                    ),
+                )
+            },
+        ) {
+            viewModel.startMonitoring()
+            onMonitoringStarted()
+        }
+
+        IconButton(
+            onClick = onLogout,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(top = 8.dp, end = 8.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Default.Logout,
+                contentDescription = "Sair",
+                tint = com.vigilia.app.ui.theme.TextSecondary,
             )
-        },
-    ) {
-        viewModel.startMonitoring()
-        onMonitoringStarted()
+        }
     }
 }
 
