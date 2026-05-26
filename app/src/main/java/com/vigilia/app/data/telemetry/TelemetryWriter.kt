@@ -8,6 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
 import java.io.FileWriter
 import java.util.UUID
@@ -88,9 +89,8 @@ class TelemetryWriter private constructor(
      * @param record The telemetry record to persist.
      */
     suspend fun writeRecord(record: TelemetryRecord) = withContext(Dispatchers.IO) {
-        val file = csvFile ?: return@withContext
-
         writeMutex.withLock {
+            val file = csvFile ?: return@withLock
             try {
                 val row = buildString {
                     append(record.sessionId).append(",")
@@ -167,17 +167,15 @@ class TelemetryWriter private constructor(
     }
 
     private fun buildSummaryJson(s: SessionSummary): String {
-        return """
-            {
-              "sessionId": "${s.sessionId}",
-              "startTime": ${s.startTime},
-              "endTime": ${s.endTime},
-              "durationMs": ${s.durationMs},
-              "totalAlerts": ${s.totalAlerts},
-              "dominantState": "${s.dominantState.name}",
-              "averageScore": ${s.averageScore},
-              "peakScore": ${s.peakScore}
-            }
-        """.trimIndent()
+        return JSONObject().apply {
+            put("sessionId", s.sessionId)
+            put("startTime", s.startTime)
+            put("endTime", s.endTime)
+            put("durationMs", s.durationMs)
+            put("totalAlerts", s.totalAlerts)
+            put("dominantState", s.dominantState.name)
+            put("averageScore", s.averageScore.toDouble())
+            put("peakScore", s.peakScore.toDouble())
+        }.toString(2)
     }
 }
