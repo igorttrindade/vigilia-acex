@@ -1,5 +1,6 @@
 package com.vigilia.app.data.repository
 
+import android.util.Log
 import com.vigilia.app.data.remote.SupabaseClient
 import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.providers.builtin.Email
@@ -25,7 +26,11 @@ class AuthRepository {
 
     /** Signs out the current user. */
     suspend fun signOut() {
-        runCatching { SupabaseClient.client.auth.signOut() }
+        try {
+            SupabaseClient.client.auth.signOut()
+        } catch (e: Exception) {
+            Log.w("AuthRepository", "Sign out failed", e)
+        }
     }
 
     /** Returns true if there is a currently logged-in user. */

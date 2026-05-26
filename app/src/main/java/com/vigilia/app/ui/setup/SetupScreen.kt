@@ -18,7 +18,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.PlayArrow
@@ -62,7 +61,6 @@ fun SetupScreen(
                 permissionLauncher.launch(
                     arrayOf(
                         android.Manifest.permission.CAMERA,
-                        android.Manifest.permission.ACCESS_COARSE_LOCATION,
                     ),
                 )
             },
@@ -184,20 +182,10 @@ fun SetupContent(
                     title = "Câmera",
                     isGranted = uiState.isCameraPermissionGranted,
                 )
-                HorizontalDivider(
-                    color = BackgroundDark,
-                    thickness = 1.dp,
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                )
-                PermissionRow(
-                    icon = Icons.Default.LocationOn,
-                    title = "Localização",
-                    isGranted = uiState.isLocationPermissionGranted,
-                )
             }
         }
 
-        if (!uiState.isCameraPermissionGranted || !uiState.isLocationPermissionGranted) {
+        if (!uiState.isCameraPermissionGranted) {
             Spacer(modifier = Modifier.height(14.dp))
             Button(
                 onClick = onRequestPermissions,
@@ -435,7 +423,6 @@ fun SetupScreenPreview() {
         SetupContent(
             uiState = SetupUiState(
                 isCameraPermissionGranted = true,
-                isLocationPermissionGranted = false,
             ),
             onCalibrationToggled = {},
             onVideoToggled = {},

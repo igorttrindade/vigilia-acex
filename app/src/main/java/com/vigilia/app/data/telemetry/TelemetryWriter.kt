@@ -5,6 +5,8 @@ import com.vigilia.app.domain.model.FatigueState
 import com.vigilia.app.domain.model.SessionSummary
 import com.vigilia.app.domain.model.TelemetryRecord
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileWriter
@@ -32,6 +34,8 @@ class TelemetryWriter private constructor(
      * Internal constructor for testing without a full Android Context.
      */
     internal constructor(baseDir: File) : this(null, baseDir)
+
+    private val writeMutex = Mutex()
 
     private var currentSessionId: String? = null
     private var sessionFolder: File? = null
@@ -86,36 +90,38 @@ class TelemetryWriter private constructor(
     suspend fun writeRecord(record: TelemetryRecord) = withContext(Dispatchers.IO) {
         val file = csvFile ?: return@withContext
 
-        try {
-            val row = buildString {
-                append(record.sessionId).append(",")
-                append(record.timestamp).append(",")
-                append(record.score).append(",")
-                append(record.state.name).append(",")
-                append(record.eyeOpenness).append(",")
-                append(record.blinkRate).append(",")
-                append(record.isYawning).append(",")
-                append(record.isFaceDetected).append(",")
-                append(record.alertActive).append("\n")
-            }
+        writeMutex.withLock {
+            try {
+                val row = buildString {
+                    append(record.sessionId).append(",")
+                    append(record.timestamp).append(",")
+                    append(record.score).append(",")
+                    append(record.state.name).append(",")
+                    append(record.eyeOpenness).append(",")
+                    append(record.blinkRate).append(",")
+                    append(record.isYawning).append(",")
+                    append(record.isFaceDetected).append(",")
+                    append(record.alertActive).append("\n")
+                }
 
-            FileWriter(file, true).use { writer ->
-                writer.append(row)
-            }
+                FileWriter(file, true).use { writer ->
+                    writer.append(row)
+                }
 
-            // Update metrics for summary
-            if (record.alertActive) {
-                totalAlerts++
-            }
-            scoreSum += record.score
-            recordCount++
-            if (record.score > peakScore) {
-                peakScore = record.score
-            }
-            stateCounts[record.state] = stateCounts.getOrDefault(record.state, 0) + 1
+                // Update metrics for summary
+                if (record.alertActive) {
+                    totalAlerts++
+                }
+                scoreSum += record.score
+                recordCount++
+                if (record.score > peakScore) {
+                    peakScore = record.score
+                }
+                stateCounts[record.state] = stateCounts.getOrDefault(record.state, 0) + 1
 
-        } catch (_: Exception) {
-            // Log error and continue to avoid crashing the session
+            } catch (_: Exception) {
+                // Log error and continue to avoid crashing the session
+            }
         }
     }
 
@@ -129,9 +135,12 @@ class TelemetryWriter private constructor(
         val folder = sessionFolder ?: throw IllegalStateException("Session folder is missing")
 
         val endTimeMillis = System.currentTimeMillis()
-        val durationMs = if (startTimeMillis > 0) endTimeMillis - startTimeMillis else 0L
-        val avgScore = if (recordCount > 0) (scoreSum / recordCount).toFloat() else 0f
-        val dominantState = stateCounts.maxByOrNull { it.value }?.key ?: FatigueState.NORMAL
+        val (durationMs, avgScore, dominantState) = writeMutex.withLock {
+            val duration = if (startTimeMillis > 0) endTimeMillis - startTimeMillis else 0L
+            val avg = if (recordCount > 0) (scoreSum / recordCount).toFloat() else 0f
+            val dominant = stateCounts.maxByOrNull { it.value }?.key ?: FatigueState.NORMAL
+            Triple(duration, avg, dominant)
+        }
 
         val summary = SessionSummary(
             sessionId = sessionId,

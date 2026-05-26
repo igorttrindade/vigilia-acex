@@ -28,7 +28,7 @@ class FatigueScorer {
         const val YAWN_THRESHOLD_PROB = 0.7f
         const val YAWN_DURATION_MS = 2_000L
         const val YAWN_RESET_MS = 5_000L
-        const val EYE_CLOSED_THRESHOLD = 0.2f
+        const val EYE_CLOSED_THRESHOLD = 0.3f
         const val EYE_OPEN_THRESHOLD = 0.4f
         const val SMOOTHING_ALPHA = 0.3f
 
