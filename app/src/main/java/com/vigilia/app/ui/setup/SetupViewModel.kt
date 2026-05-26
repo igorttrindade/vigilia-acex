@@ -16,7 +16,6 @@ import kotlinx.coroutines.flow.update
  */
 data class SetupUiState(
     val isCameraPermissionGranted: Boolean = false,
-    val isLocationPermissionGranted: Boolean = false,
     val isCalibrationEnabled: Boolean = false,
     val isVideoEnabled: Boolean = false,
     val canStartMonitoring: Boolean = false,
@@ -42,15 +41,9 @@ class SetupViewModel(application: Application) : AndroidViewModel(application) {
             Manifest.permission.CAMERA,
         ) == PackageManager.PERMISSION_GRANTED
 
-        val locationGranted = ContextCompat.checkSelfPermission(
-            getApplication(),
-            Manifest.permission.ACCESS_COARSE_LOCATION,
-        ) == PackageManager.PERMISSION_GRANTED
-
         _uiState.update {
             it.copy(
                 isCameraPermissionGranted = cameraGranted,
-                isLocationPermissionGranted = locationGranted,
                 canStartMonitoring = cameraGranted,
             )
         }
@@ -63,12 +56,10 @@ class SetupViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun onPermissionsResult(granted: Map<String, Boolean>) {
         val cameraGranted = granted[Manifest.permission.CAMERA] ?: _uiState.value.isCameraPermissionGranted
-        val locationGranted = granted[Manifest.permission.ACCESS_COARSE_LOCATION] ?: _uiState.value.isLocationPermissionGranted
 
         _uiState.update {
             it.copy(
                 isCameraPermissionGranted = cameraGranted,
-                isLocationPermissionGranted = locationGranted,
                 canStartMonitoring = cameraGranted,
             )
         }

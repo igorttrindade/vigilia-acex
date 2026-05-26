@@ -6,6 +6,7 @@ import com.vigilia.app.domain.model.FatigueState
 import com.vigilia.app.domain.model.SessionSummary
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
 
 /**
@@ -66,8 +67,17 @@ class SessionRepository private constructor(
         for (folder in folders) {
             try {
                 val summaryFile = File(folder, "session_summary.json")
-                if (!summaryFile.exists()) continue
-                val startTime = extractLong(summaryFile.readText(), "startTime") ?: continue
+                if (!summaryFile.exists()) {
+                    // Orphaned folder from a crashed session — clean up if older than 1 day
+                    val lastModified = File(folder, "session.csv").takeIf { it.exists() }?.lastModified()
+                        ?: folder.lastModified()
+                    if (System.currentTimeMillis() - lastModified > 24 * 60 * 60 * 1000L) {
+                        folder.deleteRecursively()
+                        deleted++
+                    }
+                    continue
+                }
+                val startTime = parseSummaryJson(summaryFile.readText())?.startTime ?: continue
                 if (startTime < cutoff) {
                     folder.deleteRecursively()
                     deleted++
@@ -91,59 +101,26 @@ class SessionRepository private constructor(
         return File(baseDir, sessionId)
     }
 
-    /**
-     * Manually parses a session summary JSON string into a [SessionSummary] object.
-     * This avoids adding external JSON library dependencies.
-     */
     private fun parseSummaryJson(json: String): SessionSummary? {
         return try {
-            val sessionId = extractString(json, "sessionId") ?: return null
-            val startTime = extractLong(json, "startTime") ?: 0L
-            val endTime = extractLong(json, "endTime") ?: 0L
-            val durationMs = extractLong(json, "durationMs") ?: 0L
-            val totalAlerts = extractInt(json, "totalAlerts") ?: 0
-            val dominantStateStr = extractString(json, "dominantState") ?: "NORMAL"
+            val obj = JSONObject(json)
             val dominantState = try {
-                FatigueState.valueOf(dominantStateStr)
+                FatigueState.valueOf(obj.getString("dominantState"))
             } catch (_: Exception) {
                 FatigueState.NORMAL
             }
-            val averageScore = extractFloat(json, "averageScore") ?: 0f
-            val peakScore = extractFloat(json, "peakScore") ?: 0f
-
             SessionSummary(
-                sessionId = sessionId,
-                startTime = startTime,
-                endTime = endTime,
-                durationMs = durationMs,
-                totalAlerts = totalAlerts,
+                sessionId = obj.getString("sessionId"),
+                startTime = obj.getLong("startTime"),
+                endTime = obj.getLong("endTime"),
+                durationMs = obj.getLong("durationMs"),
+                totalAlerts = obj.getInt("totalAlerts"),
                 dominantState = dominantState,
-                averageScore = averageScore,
-                peakScore = peakScore
+                averageScore = obj.getDouble("averageScore").toFloat(),
+                peakScore = obj.getDouble("peakScore").toFloat(),
             )
         } catch (_: Exception) {
             null
         }
-    }
-
-    private fun extractString(json: String, key: String): String? {
-        val pattern = "\"$key\"\\s*:\\s*\"([^\"]*)\"".toRegex()
-        return pattern.find(json)?.groupValues?.get(1)
-    }
-
-    private fun extractLong(json: String, key: String): Long? {
-        val pattern = "\"$key\"\\s*:\\s*(\\d+)".toRegex()
-        return pattern.find(json)?.groupValues?.get(1)?.toLongOrNull()
-    }
-
-    @Suppress("SameParameterValue")
-    private fun extractInt(json: String, key: String): Int? {
-        val pattern = "\"$key\"\\s*:\\s*(\\d+)".toRegex()
-        return pattern.find(json)?.groupValues?.get(1)?.toIntOrNull()
-    }
-
-    private fun extractFloat(json: String, key: String): Float? {
-        val pattern = "\"$key\"\\s*:\\s*([\\d.]+)".toRegex()
-        return pattern.find(json)?.groupValues?.get(1)?.toFloatOrNull()
     }
 }

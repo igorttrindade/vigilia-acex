@@ -90,6 +90,9 @@ class MonitoringViewModel : ViewModel() {
 
         val now = System.currentTimeMillis()
         frameWindow.addLast(now to assessment.isFaceDetected)
+        while (frameWindow.size > 2000) {
+            frameWindow.removeFirst()
+        }
         while (frameWindow.isNotEmpty() && now - frameWindow.first().first > 60_000L) {
             frameWindow.removeFirst()
         }

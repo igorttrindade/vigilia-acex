@@ -12,6 +12,7 @@ import com.vigilia.app.domain.model.SessionSummary
 import io.github.jan.supabase.postgrest.from
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
 
 /** Syncs completed local sessions to the Supabase cloud. */
@@ -99,6 +100,10 @@ class SyncRepository(private val context: Context) {
     private fun parseCsvLine(line: String, sessionId: String, userId: String): TelemetryRecordDto? {
         return try {
             val p = line.split(",")
+            if (p.size < 9) {
+                Log.w("SyncRepository", "Skipping malformed CSV line (${p.size} fields): $line")
+                return null
+            }
             TelemetryRecordDto(
                 sessionId = sessionId,
                 userId = userId,
@@ -116,18 +121,21 @@ class SyncRepository(private val context: Context) {
 
     private fun parseSummaryJson(folder: File): SessionSummary? {
         return try {
-            val text = File(folder, "session_summary.json").readText()
-            fun field(key: String) = Regex(""""$key"\s*:\s*"?([^",\n}]+)"?""")
-                .find(text)?.groupValues?.get(1)?.trim()
+            val obj = JSONObject(File(folder, "session_summary.json").readText())
+            val dominantState = try {
+                FatigueState.valueOf(obj.getString("dominantState"))
+            } catch (_: Exception) {
+                FatigueState.NORMAL
+            }
             SessionSummary(
-                sessionId = field("sessionId") ?: return null,
-                startTime = field("startTime")?.toLong() ?: return null,
-                endTime = field("endTime")?.toLong() ?: return null,
-                durationMs = field("durationMs")?.toLong() ?: return null,
-                totalAlerts = field("totalAlerts")?.toInt() ?: return null,
-                dominantState = FatigueState.valueOf(field("dominantState") ?: "NORMAL"),
-                averageScore = field("averageScore")?.toFloat() ?: return null,
-                peakScore = field("peakScore")?.toFloat() ?: return null,
+                sessionId = obj.getString("sessionId"),
+                startTime = obj.getLong("startTime"),
+                endTime = obj.getLong("endTime"),
+                durationMs = obj.getLong("durationMs"),
+                totalAlerts = obj.getInt("totalAlerts"),
+                dominantState = dominantState,
+                averageScore = obj.getDouble("averageScore").toFloat(),
+                peakScore = obj.getDouble("peakScore").toFloat(),
             )
         } catch (_: Exception) { null }
     }

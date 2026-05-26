@@ -128,7 +128,7 @@ class CameraManager(private val context: Context) {
 
     fun stopCamera() {
         cameraProvider?.unbindAll()
-        analysisExecutor?.shutdown()
+        analysisExecutor?.shutdownNow()
         analysisExecutor = null
         currentPreview = null
         currentAnalysis = null

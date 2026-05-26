@@ -23,6 +23,7 @@ import com.vigilia.app.camera.CameraManager
 import com.vigilia.app.data.repository.SyncRepository
 import com.vigilia.app.data.telemetry.TelemetryWriter
 import com.vigilia.app.domain.model.FatigueAssessment
+import com.vigilia.app.domain.model.FatigueMetrics
 import com.vigilia.app.domain.model.FatigueState
 import com.vigilia.app.domain.model.TelemetryRecord
 import com.vigilia.app.domain.scoring.FatigueScorer
@@ -30,8 +31,6 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
-import java.util.Timer
-import java.util.TimerTask
 
 /**
  * Foreground Service that orchestrates the full monitoring pipeline.
@@ -62,9 +61,11 @@ class MonitoringService : Service(), LifecycleOwner {
     
     private var wakeLock: PowerManager.WakeLock? = null
     private var ringtone: Ringtone? = null
-    private var alertTimer: Timer? = null
+    private var alertJob: Job? = null
 
+    @Volatile
     private var sessionId: String? = null
+    @Volatile
     private var lastTelemetryWriteTime = 0L
     private val telemetryIntervalMs = 2000L
     
@@ -113,9 +114,9 @@ class MonitoringService : Service(), LifecycleOwner {
                     { metrics ->
                         // Stop processing immediately if flag is false
                         if (!isProcessRunning) return@startCamera
-                        
+
                         val assessment = scorer.processFrame(metrics)
-                        handleAssessment(assessment)
+                        handleAssessment(assessment, metrics)
                         currentAssessment.value = assessment
                     }
                 )
@@ -146,7 +147,7 @@ class MonitoringService : Service(), LifecycleOwner {
         cameraManager.updatePreview(this, null)
     }
 
-    private fun handleAssessment(assessment: FatigueAssessment) {
+    private fun handleAssessment(assessment: FatigueAssessment, metrics: FatigueMetrics) {
         updateNotification("Monitorando... Estado: ${assessment.fatigueState}")
 
         val previousAssessment = currentAssessment.value
@@ -161,21 +162,21 @@ class MonitoringService : Service(), LifecycleOwner {
         val currentTime = System.currentTimeMillis()
         if ((currentTime - lastTelemetryWriteTime) >= telemetryIntervalMs) {
             val sId = sessionId ?: return
+            lastTelemetryWriteTime = currentTime
             serviceScope.launch {
                 telemetryWriter.writeRecord(
                     TelemetryRecord(
                         sessionId = sId,
-                        timestamp = System.currentTimeMillis(),
+                        timestamp = currentTime,
                         score = assessment.score,
                         state = assessment.fatigueState,
-                        eyeOpenness = 0f, 
+                        eyeOpenness = (metrics.leftEyeOpenProbability + metrics.rightEyeOpenProbability) / 2f,
                         blinkRate = assessment.blinkRate,
                         isYawning = assessment.isYawning,
                         isFaceDetected = assessment.isFaceDetected,
                         alertActive = isAlertActive(),
                     )
                 )
-                lastTelemetryWriteTime = currentTime
             }
         }
     }
@@ -193,8 +194,9 @@ class MonitoringService : Service(), LifecycleOwner {
                 }
                 play()
             }
-            alertTimer = Timer().apply {
-                schedule(object : TimerTask() { override fun run() { stopAlert() } }, 3000L)
+            alertJob = serviceScope.launch {
+                delay(3000L)
+                stopAlert()
             }
         } catch (e: Exception) { Log.e("MonitoringService", "Alert failed", e) }
     }
@@ -202,8 +204,8 @@ class MonitoringService : Service(), LifecycleOwner {
     private fun stopAlert() {
         ringtone?.stop()
         ringtone = null
-        alertTimer?.cancel()
-        alertTimer = null
+        alertJob?.cancel()
+        alertJob = null
     }
 
     private fun isAlertActive(): Boolean = ringtone?.isPlaying == true
@@ -250,8 +252,14 @@ class MonitoringService : Service(), LifecycleOwner {
     override fun onDestroy() {
         isProcessRunning = false
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
-        
-        runBlocking(Dispatchers.IO) {
+        currentAssessment.value = null
+        sessionId = null
+        cameraManager.stopCamera()
+        stopAlert()
+        releaseWakeLock()
+        serviceScope.cancel()
+
+        CoroutineScope(Dispatchers.IO).launch {
             try {
                 telemetryWriter.stopSession()
             } catch (e: Exception) {
@@ -268,13 +276,7 @@ class MonitoringService : Service(), LifecycleOwner {
                 Log.w("MonitoringService", "Session sync failed, will retry next time", e)
             }
         }
-        
-        currentAssessment.value = null
-        sessionId = null
-        cameraManager.stopCamera()
-        stopAlert()
-        releaseWakeLock()
-        serviceScope.cancel()
+
         super.onDestroy()
     }
 
