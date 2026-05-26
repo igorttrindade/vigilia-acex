@@ -68,7 +68,7 @@ class FaceAnalyzer(
                             "NOSE_BASE=${noseBase != null}")
 
                         val faceHeight = face.boundingBox.height().toFloat()
-                        val mouthOpenScore = when {
+                        val mouthOpenScore = if (faceHeight <= 0f) 0f else when {
                             noseBase != null && mouthBottom != null -> {
                                 val distance = abs(noseBase.position.y - mouthBottom.position.y)
                                 (distance / faceHeight).coerceIn(0f, 1f)

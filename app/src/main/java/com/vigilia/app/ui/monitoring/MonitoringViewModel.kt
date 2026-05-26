@@ -63,9 +63,12 @@ class MonitoringViewModel : ViewModel() {
                 val positioningWarning = computePositioningWarning(assessment)
 
                 _uiState.update { state ->
+                    val prevState = state.assessment?.fatigueState
+                    val wasAlerting = prevState == com.vigilia.app.domain.model.FatigueState.WARNING ||
+                                     prevState == com.vigilia.app.domain.model.FatigueState.FATIGUED
                     val newAlertCount = if (
                         assessment != null &&
-                        assessment.fatigueState != state.assessment?.fatigueState &&
+                        !wasAlerting &&
                         (assessment.fatigueState == com.vigilia.app.domain.model.FatigueState.WARNING ||
                          assessment.fatigueState == com.vigilia.app.domain.model.FatigueState.FATIGUED)
                     ) {
