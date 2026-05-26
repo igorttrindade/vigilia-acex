@@ -48,6 +48,7 @@ class MonitoringService : Service(), LifecycleOwner {
         const val ACTION_STOP = "com.vigilia.app.STOP_MONITORING"
         private const val CHANNEL_ID = "vigilia_monitoring"
         private const val NOTIFICATION_ID = 1
+        private const val ALERT_COOLDOWN_MS = 30_000L
 
         val currentAssessment = MutableStateFlow<FatigueAssessment?>(null)
     }
@@ -62,6 +63,8 @@ class MonitoringService : Service(), LifecycleOwner {
     private var wakeLock: PowerManager.WakeLock? = null
     private var ringtone: Ringtone? = null
     private var alertJob: Job? = null
+    @Volatile
+    private var lastAlertTimeMs = 0L
 
     @Volatile
     private var sessionId: String? = null
@@ -182,6 +185,9 @@ class MonitoringService : Service(), LifecycleOwner {
     }
 
     private fun triggerAlert() {
+        val now = System.currentTimeMillis()
+        if (now - lastAlertTimeMs < ALERT_COOLDOWN_MS) return
+        lastAlertTimeMs = now
         stopAlert()
         try {
             val alertUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
