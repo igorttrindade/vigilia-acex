@@ -117,6 +117,13 @@ class SyncRepository(private val context: Context) {
                 alertActive = p[8].toBoolean(),
                 latitude = if (p.size > 9) p[9].toDoubleOrNull() else null,
                 longitude = if (p.size > 10) p[10].toDoubleOrNull() else null,
+                speed = if (p.size > 11) p[11].toFloatOrNull() else null,
+                accelX = if (p.size > 12) p[12].toFloatOrNull() else null,
+                accelY = if (p.size > 13) p[13].toFloatOrNull() else null,
+                accelZ = if (p.size > 14) p[14].toFloatOrNull() else null,
+                gyroX = if (p.size > 15) p[15].toFloatOrNull() else null,
+                gyroY = if (p.size > 16) p[16].toFloatOrNull() else null,
+                gyroZ = if (p.size > 17) p[17].toFloatOrNull() else null,
             )
         } catch (_: Exception) { null }
     }

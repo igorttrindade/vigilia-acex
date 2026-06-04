@@ -42,4 +42,11 @@ data class TelemetryRecord(
     val alertActive: Boolean,
     val latitude: Double? = null,
     val longitude: Double? = null,
+    val speed: Float? = null,
+    val accelX: Float? = null,
+    val accelY: Float? = null,
+    val accelZ: Float? = null,
+    val gyroX: Float? = null,
+    val gyroY: Float? = null,
+    val gyroZ: Float? = null,
 )

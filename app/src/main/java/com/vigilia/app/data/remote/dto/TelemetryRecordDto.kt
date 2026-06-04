@@ -18,4 +18,11 @@ data class TelemetryRecordDto(
     @SerialName("alert_active") val alertActive: Boolean,
     @SerialName("latitude") val latitude: Double? = null,
     @SerialName("longitude") val longitude: Double? = null,
+    @SerialName("speed") val speed: Float? = null,
+    @SerialName("accel_x") val accelX: Float? = null,
+    @SerialName("accel_y") val accelY: Float? = null,
+    @SerialName("accel_z") val accelZ: Float? = null,
+    @SerialName("gyro_x") val gyroX: Float? = null,
+    @SerialName("gyro_y") val gyroY: Float? = null,
+    @SerialName("gyro_z") val gyroZ: Float? = null,
 )

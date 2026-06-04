@@ -65,7 +65,7 @@ class TelemetryWriter private constructor(
         }
 
         val file = File(folder, "session.csv")
-        file.writeText("sessionId,timestamp,score,state,eyeOpenness,blinkRate,isYawning,isFaceDetected,alertActive,latitude,longitude\n")
+        file.writeText("sessionId,timestamp,score,state,eyeOpenness,blinkRate,isYawning,isFaceDetected,alertActive,latitude,longitude,speed,accelX,accelY,accelZ,gyroX,gyroY,gyroZ\n")
 
         currentSessionId = sessionId
         sessionFolder = folder
@@ -103,7 +103,14 @@ class TelemetryWriter private constructor(
                     append(record.isFaceDetected).append(",")
                     append(record.alertActive).append(",")
                     append(record.latitude?.toString() ?: "").append(",")
-                    append(record.longitude?.toString() ?: "").append("\n")
+                    append(record.longitude?.toString() ?: "").append(",")
+                    append(record.speed?.toString() ?: "").append(",")
+                    append(record.accelX?.toString() ?: "").append(",")
+                    append(record.accelY?.toString() ?: "").append(",")
+                    append(record.accelZ?.toString() ?: "").append(",")
+                    append(record.gyroX?.toString() ?: "").append(",")
+                    append(record.gyroY?.toString() ?: "").append(",")
+                    append(record.gyroZ?.toString() ?: "").append("\n")
                 }
 
                 FileWriter(file, true).use { writer ->

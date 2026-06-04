@@ -2,6 +2,10 @@ package com.vigilia.app.service
 
 import android.Manifest
 import android.app.Notification
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
@@ -64,6 +68,7 @@ class MonitoringService : Service(), LifecycleOwner {
     private lateinit var scorer: FatigueScorer
     private lateinit var telemetryWriter: TelemetryWriter
     private lateinit var fusedLocationClient: FusedLocationProviderClient
+    private lateinit var sensorManager: SensorManager
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var ringtone: Ringtone? = null
@@ -71,14 +76,40 @@ class MonitoringService : Service(), LifecycleOwner {
     @Volatile private var lastAlertTimeMs = 0L
     @Volatile private var lastLatitude: Double? = null
     @Volatile private var lastLongitude: Double? = null
+    @Volatile private var lastSpeed: Float? = null
+    @Volatile private var lastAccelX: Float? = null
+    @Volatile private var lastAccelY: Float? = null
+    @Volatile private var lastAccelZ: Float? = null
+    @Volatile private var lastGyroX: Float? = null
+    @Volatile private var lastGyroY: Float? = null
+    @Volatile private var lastGyroZ: Float? = null
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
             result.lastLocation?.let { loc ->
                 lastLatitude = loc.latitude
                 lastLongitude = loc.longitude
+                lastSpeed = if (loc.hasSpeed()) loc.speed else null
             }
         }
+    }
+
+    private val sensorListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            when (event.sensor.type) {
+                Sensor.TYPE_ACCELEROMETER -> {
+                    lastAccelX = event.values[0]
+                    lastAccelY = event.values[1]
+                    lastAccelZ = event.values[2]
+                }
+                Sensor.TYPE_GYROSCOPE -> {
+                    lastGyroX = event.values[0]
+                    lastGyroY = event.values[1]
+                    lastGyroZ = event.values[2]
+                }
+            }
+        }
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
     }
 
     @Volatile
@@ -104,6 +135,7 @@ class MonitoringService : Service(), LifecycleOwner {
         scorer = FatigueScorer()
         telemetryWriter = TelemetryWriter(this)
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+        sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
 
         createNotificationChannel()
     }
@@ -123,6 +155,7 @@ class MonitoringService : Service(), LifecycleOwner {
         startForeground(NOTIFICATION_ID, createNotification("Iniciando monitoramento..."))
         acquireWakeLock()
         startLocationUpdates()
+        startSensorUpdates()
         
         serviceScope.launch {
             try {
@@ -153,6 +186,7 @@ class MonitoringService : Service(), LifecycleOwner {
         isProcessRunning = false
         currentAssessment.value = null
         stopLocationUpdates()
+        stopSensorUpdates()
 
         stopForeground(STOP_FOREGROUND_REMOVE)
 
@@ -198,6 +232,13 @@ class MonitoringService : Service(), LifecycleOwner {
                         alertActive = isAlertActive(),
                         latitude = lastLatitude,
                         longitude = lastLongitude,
+                        speed = lastSpeed,
+                        accelX = lastAccelX,
+                        accelY = lastAccelY,
+                        accelZ = lastAccelZ,
+                        gyroX = lastGyroX,
+                        gyroY = lastGyroY,
+                        gyroZ = lastGyroZ,
                     )
                 )
             }
@@ -235,6 +276,22 @@ class MonitoringService : Service(), LifecycleOwner {
     }
 
     private fun isAlertActive(): Boolean = ringtone?.isPlaying == true
+
+    private fun startSensorUpdates() {
+        sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
+            sensorManager.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_NORMAL)
+        }
+        sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)?.let {
+            sensorManager.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_NORMAL)
+        }
+    }
+
+    private fun stopSensorUpdates() {
+        sensorManager.unregisterListener(sensorListener)
+        lastAccelX = null; lastAccelY = null; lastAccelZ = null
+        lastGyroX = null; lastGyroY = null; lastGyroZ = null
+        lastSpeed = null
+    }
 
     private fun startLocationUpdates() {
         val hasFine = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
