@@ -54,6 +54,7 @@ class MonitoringService : Service(), LifecycleOwner {
     companion object {
         const val ACTION_START = "com.vigilia.app.START_MONITORING"
         const val ACTION_STOP = "com.vigilia.app.STOP_MONITORING"
+        const val EXTRA_CALIBRATION_ENABLED = "extra_calibration_enabled"
         private const val CHANNEL_ID = "vigilia_monitoring"
         private const val NOTIFICATION_ID = 1
         private const val ALERT_COOLDOWN_MS = 30_000L
@@ -131,7 +132,7 @@ class MonitoringService : Service(), LifecycleOwner {
         serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
         
         cameraManager = CameraManager(this)
-        scorer = FatigueScorer()
+        scorer = FatigueScorer() // replaced in startMonitoring with calibration flag
         telemetryWriter = TelemetryWriter(this)
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
@@ -141,15 +142,19 @@ class MonitoringService : Service(), LifecycleOwner {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> startMonitoring()
+            ACTION_START -> {
+                val calibrationEnabled = intent.getBooleanExtra(EXTRA_CALIBRATION_ENABLED, true)
+                startMonitoring(calibrationEnabled)
+            }
             ACTION_STOP -> stopMonitoring()
         }
         return START_NOT_STICKY
     }
 
-    private fun startMonitoring() {
+    private fun startMonitoring(calibrationEnabled: Boolean = true) {
         if (isProcessRunning) return
 
+        scorer = FatigueScorer(calibrationEnabled)
         isProcessRunning = true
         startForeground(NOTIFICATION_ID, createNotification("Iniciando monitoramento..."))
         acquireWakeLock()

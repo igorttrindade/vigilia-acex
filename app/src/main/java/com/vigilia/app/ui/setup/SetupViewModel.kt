@@ -17,7 +17,7 @@ import kotlinx.coroutines.flow.update
 data class SetupUiState(
     val isCameraPermissionGranted: Boolean = false,
     val isLocationPermissionGranted: Boolean = false,
-    val isCalibrationEnabled: Boolean = false,
+    val isCalibrationEnabled: Boolean = true,
     val canStartMonitoring: Boolean = false,
 )
 
@@ -77,7 +77,7 @@ class SetupViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun startMonitoring() {
         if (_uiState.value.canStartMonitoring) {
-            ServiceController.startMonitoring(getApplication())
+            ServiceController.startMonitoring(getApplication(), _uiState.value.isCalibrationEnabled)
         }
     }
 

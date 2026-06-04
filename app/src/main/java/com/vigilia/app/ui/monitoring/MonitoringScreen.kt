@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
@@ -171,6 +172,22 @@ fun MonitoringOverlay(uiState: MonitoringUiState) {
             ScoreIndicator(score = assessment?.score ?: 0f, state = assessment?.fatigueState ?: FatigueState.NO_FACE)
         }
 
+        if (assessment?.fatigueState == FatigueState.CALIBRATING) {
+            Spacer(modifier = Modifier.height(10.dp))
+            LinearProgressIndicator(
+                progress = { assessment.calibrationProgress },
+                modifier = Modifier.fillMaxWidth(),
+                color = Color(0xFF60A5FA),
+                trackColor = Color(0xFF60A5FA).copy(alpha = 0.20f),
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Calibrando para o seu rosto...",
+                color = Color(0xFF60A5FA),
+                fontSize = 12.sp,
+            )
+        }
+
         Spacer(modifier = Modifier.height(8.dp))
 
         AnimatedVisibility(
@@ -234,6 +251,7 @@ fun StatePill(state: FatigueState) {
         FatigueState.WARNING -> Triple(AccentAmber, "ATENÇÃO", Icons.Default.Warning)
         FatigueState.FATIGUED -> Triple(AlertRed, "FADIGADO", Icons.Default.Warning)
         FatigueState.NO_FACE -> Triple(Color(0xFF6B7280), "SEM ROSTO", Icons.Default.VisibilityOff)
+        FatigueState.CALIBRATING -> Triple(Color(0xFF60A5FA), "CALIBRANDO", Icons.Default.Tune)
     }
 
     val shouldPulse = state == FatigueState.WARNING || state == FatigueState.FATIGUED
@@ -283,6 +301,7 @@ fun ScoreIndicator(score: Float, state: FatigueState) {
         FatigueState.WARNING -> AccentAmber
         FatigueState.FATIGUED -> AlertRed
         FatigueState.NO_FACE -> Color(0xFF6B7280)
+        FatigueState.CALIBRATING -> Color(0xFF60A5FA)
     }
     Box(contentAlignment = Alignment.Center, modifier = Modifier.size(80.dp)) {
         Canvas(modifier = Modifier.size(80.dp)) {
@@ -328,6 +347,7 @@ fun BottomMonitoringCard(uiState: MonitoringUiState, onToggleMonitoring: () -> U
         FatigueState.NORMAL -> NormalGreen
         FatigueState.WARNING -> AccentAmber
         FatigueState.FATIGUED -> AlertRed
+        FatigueState.CALIBRATING -> Color(0xFF60A5FA)
         else -> Color(0xFF374151)
     }
 

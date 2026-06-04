@@ -224,7 +224,7 @@ fun SessionCard(
         FatigueState.NORMAL -> NormalGreen
         FatigueState.WARNING -> AccentAmber
         FatigueState.FATIGUED -> AlertRed
-        FatigueState.NO_FACE -> Color(0xFF6B7280)
+        FatigueState.NO_FACE, FatigueState.CALIBRATING -> Color(0xFF6B7280)
     }
 
     Surface(
@@ -324,7 +324,7 @@ fun StateBadge(state: FatigueState) {
         FatigueState.NORMAL -> NormalGreen to "NORMAL"
         FatigueState.WARNING -> AccentAmber to "ATENÇÃO"
         FatigueState.FATIGUED -> AlertRed to "FADIGADO"
-        FatigueState.NO_FACE -> Color.Gray to "SEM ROSTO"
+        FatigueState.NO_FACE, FatigueState.CALIBRATING -> Color.Gray to "SEM ROSTO"
     }
 
     Surface(

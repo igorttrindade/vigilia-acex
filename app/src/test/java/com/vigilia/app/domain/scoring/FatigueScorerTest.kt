@@ -14,7 +14,7 @@ class FatigueScorerTest {
 
     @Before
     fun setUp() {
-        scorer = FatigueScorer()
+        scorer = FatigueScorer(calibrationEnabled = false)
     }
 
     @Test

@@ -1,6 +1,6 @@
 package com.vigilia.app.domain.model
 
-enum class FatigueState { NORMAL, WARNING, FATIGUED, NO_FACE }
+enum class FatigueState { NORMAL, WARNING, FATIGUED, NO_FACE, CALIBRATING }
 
 data class FatigueMetrics(
     val leftEyeOpenProbability: Float,
@@ -16,7 +16,8 @@ data class FatigueAssessment(
     val blinkRate: Float,
     val isYawning: Boolean,
     val isFaceDetected: Boolean,
-    val timestampMs: Long
+    val timestampMs: Long,
+    val calibrationProgress: Float = 0f,
 )
 
 data class SessionSummary(

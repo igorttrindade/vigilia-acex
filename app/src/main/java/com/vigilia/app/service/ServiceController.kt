@@ -15,9 +15,10 @@ object ServiceController {
      *
      * @param context The context used to start the service.
      */
-    fun startMonitoring(context: Context) {
+    fun startMonitoring(context: Context, calibrationEnabled: Boolean = true) {
         val intent = Intent(context, MonitoringService::class.java).apply {
             action = MonitoringService.ACTION_START
+            putExtra(MonitoringService.EXTRA_CALIBRATION_ENABLED, calibrationEnabled)
         }
         ContextCompat.startForegroundService(context, intent)
     }

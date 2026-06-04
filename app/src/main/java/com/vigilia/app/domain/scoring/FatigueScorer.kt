@@ -9,18 +9,13 @@ import java.util.ArrayDeque
 /**
  * Core fatigue detection logic for the Vigília app.
  *
- * This class processes individual frames of eye and mouth metrics to calculate a fatigue score (0-100)
- * and assess the user's fatigue state using computer vision signals.
- *
- * Key metrics used:
- * - PERCLOS (Percentage of Eye Closure): Calculated over a 20-second rolling window.
- * - Blink Rate: Tracked over a 60-second rolling window.
- * - Yawn Detection: Sustained mouth opening for at least 2 seconds.
- *
- * The scorer uses exponential smoothing and a hysteresis state machine to ensure stable transitions
- * between fatigue states (NORMAL, WARNING, FATIGUED).
+ * When [calibrationEnabled] is true (default), the scorer spends the first
+ * [CALIBRATION_DURATION_MS] milliseconds measuring the driver's natural eye
+ * openness and derives a personal [eyeClosedThreshold] instead of using the
+ * generic default. This improves accuracy for drivers with naturally smaller
+ * or larger eyes.
  */
-class FatigueScorer {
+class FatigueScorer(private val calibrationEnabled: Boolean = true) {
 
     private companion object {
         const val PERCLOS_WINDOW_MS = 20_000L
@@ -28,9 +23,11 @@ class FatigueScorer {
         const val YAWN_THRESHOLD_PROB = 0.7f
         const val YAWN_DURATION_MS = 2_000L
         const val YAWN_RESET_MS = 5_000L
-        const val EYE_CLOSED_THRESHOLD = 0.3f
-        const val EYE_OPEN_THRESHOLD = 0.4f
         const val SMOOTHING_ALPHA = 0.3f
+
+        // Generic thresholds — replaced by calibrated values when calibration runs
+        const val EYE_CLOSED_THRESHOLD_DEFAULT = 0.3f
+        const val EYE_OPEN_THRESHOLD_DEFAULT = 0.4f
 
         const val SCORE_WEIGHT_PERCLOS = 50f
         const val SCORE_WEIGHT_BLINK = 30f
@@ -43,15 +40,19 @@ class FatigueScorer {
 
         const val TRANSITION_NORMAL_TO_WARNING_SCORE = 40f
         const val TRANSITION_NORMAL_TO_WARNING_MS = 2_000L
-
         const val TRANSITION_WARNING_TO_FATIGUED_SCORE = 70f
         const val TRANSITION_WARNING_TO_FATIGUED_MS = 4_000L
-
         const val TRANSITION_WARNING_TO_NORMAL_SCORE = 25f
         const val TRANSITION_WARNING_TO_NORMAL_MS = 10_000L
-
         const val TRANSITION_FATIGUED_TO_WARNING_SCORE = 50f
         const val TRANSITION_FATIGUED_TO_WARNING_MS = 10_000L
+
+        // Calibration
+        const val CALIBRATION_DURATION_MS = 7_000L
+        const val CALIBRATION_MIN_SAMPLES = 20
+        const val EYE_CLOSED_RATIO = 0.40f   // closed = baseline * this
+        const val EYE_CLOSED_MIN = 0.15f
+        const val EYE_CLOSED_MAX = 0.45f
     }
 
     private data class FrameRecord(val timestampMs: Long, val isEyeClosed: Boolean)
@@ -68,16 +69,15 @@ class FatigueScorer {
     private var smoothedScore = 0f
     private var currentState = FatigueState.NORMAL
 
-    // State transition tracking
     private var transitionStartTime: Long? = null
     private var targetState: FatigueState? = null
 
-    /**
-     * Processes a new frame of fatigue metrics and returns the current assessment.
-     *
-     * @param metrics The raw metrics detected for the current frame.
-     * @return A [FatigueAssessment] containing the calculated score and state.
-     */
+    // Calibration state
+    private var calibrationStartMs = -1L
+    private val calibrationSamples = mutableListOf<Float>()
+    private var eyeClosedThreshold = EYE_CLOSED_THRESHOLD_DEFAULT
+    private var eyeOpenThreshold = EYE_OPEN_THRESHOLD_DEFAULT
+
     fun processFrame(metrics: FatigueMetrics): FatigueAssessment {
         if (!metrics.isFaceDetected) {
             currentState = FatigueState.NO_FACE
@@ -87,14 +87,54 @@ class FatigueScorer {
         }
 
         if (currentState == FatigueState.NO_FACE) {
-            currentState = FatigueState.NORMAL
+            currentState = if (calibrationEnabled && calibrationStartMs < 0) FatigueState.CALIBRATING else FatigueState.NORMAL
         }
 
         val currentTime = metrics.timestampMs
         val eyeOpenness = (metrics.leftEyeOpenProbability + metrics.rightEyeOpenProbability) / 2f
-        val isEyeClosed = metrics.leftEyeOpenProbability < EYE_CLOSED_THRESHOLD || 
-                          metrics.rightEyeOpenProbability < EYE_CLOSED_THRESHOLD ||
-                          eyeOpenness < EYE_CLOSED_THRESHOLD
+
+        // Calibration phase — collect baseline before scoring begins
+        if (calibrationEnabled && currentState == FatigueState.CALIBRATING) {
+            if (calibrationStartMs < 0) calibrationStartMs = currentTime
+            calibrationSamples.add(eyeOpenness)
+
+            val elapsed = currentTime - calibrationStartMs
+            val progress = (elapsed.toFloat() / CALIBRATION_DURATION_MS).coerceIn(0f, 1f)
+
+            if (elapsed >= CALIBRATION_DURATION_MS) {
+                finishCalibration()
+                currentState = FatigueState.NORMAL
+            } else {
+                return FatigueAssessment(
+                    score = 0f,
+                    fatigueState = FatigueState.CALIBRATING,
+                    blinkRate = 0f,
+                    isYawning = false,
+                    isFaceDetected = true,
+                    timestampMs = currentTime,
+                    calibrationProgress = progress,
+                )
+            }
+        }
+
+        // Start calibration on first face-detected frame
+        if (calibrationEnabled && calibrationStartMs < 0) {
+            calibrationStartMs = currentTime
+            currentState = FatigueState.CALIBRATING
+            return FatigueAssessment(
+                score = 0f,
+                fatigueState = FatigueState.CALIBRATING,
+                blinkRate = 0f,
+                isYawning = false,
+                isFaceDetected = true,
+                timestampMs = currentTime,
+                calibrationProgress = 0f,
+            )
+        }
+
+        val isEyeClosed = metrics.leftEyeOpenProbability < eyeClosedThreshold ||
+                metrics.rightEyeOpenProbability < eyeClosedThreshold ||
+                eyeOpenness < eyeClosedThreshold
 
         // 1. PERCLOS Calculation
         perclosWindow.addLast(FrameRecord(currentTime, isEyeClosed))
@@ -106,16 +146,16 @@ class FatigueScorer {
         }
 
         // 2. Blink Detection
-        if (!isBlinking && eyeOpenness < EYE_CLOSED_THRESHOLD) {
+        if (!isBlinking && eyeOpenness < eyeClosedThreshold) {
             isBlinking = true
-        } else if (isBlinking && eyeOpenness > EYE_OPEN_THRESHOLD) {
+        } else if (isBlinking && eyeOpenness > eyeOpenThreshold) {
             blinkTimestamps.addLast(currentTime)
             isBlinking = false
         }
         while (blinkTimestamps.isNotEmpty() && currentTime - blinkTimestamps.first() > BLINK_WINDOW_MS) {
             blinkTimestamps.removeFirst()
         }
-        val blinkRate = blinkTimestamps.size.toFloat() // Blinks per minute (since window is 60s)
+        val blinkRate = blinkTimestamps.size.toFloat()
 
         // 3. Yawn Detection
         if (metrics.mouthOpenProbability > YAWN_THRESHOLD_PROB) {
@@ -137,18 +177,12 @@ class FatigueScorer {
 
         // 4. Score Calculation
         val perclosContribution = perclos * SCORE_WEIGHT_PERCLOS
-
-        val blinkDeviationScore = calculateBlinkDeviationScore(blinkRate)
-        val blinkContribution = blinkDeviationScore * SCORE_WEIGHT_BLINK
-
+        val blinkContribution = calculateBlinkDeviationScore(blinkRate) * SCORE_WEIGHT_BLINK
         val yawnContribution = if (isCurrentlyYawning) SCORE_WEIGHT_YAWN else 0f
 
         val rawScore = perclosContribution + blinkContribution + yawnContribution
-        smoothedScore = if (smoothedScore == 0f && rawScore > 0) {
-            rawScore
-        } else {
-            (SMOOTHING_ALPHA * rawScore) + (1f - SMOOTHING_ALPHA) * smoothedScore
-        }
+        smoothedScore = if (smoothedScore == 0f && rawScore > 0) rawScore
+        else (SMOOTHING_ALPHA * rawScore) + (1f - SMOOTHING_ALPHA) * smoothedScore
 
         Log.d("FatigueScorer", "score=$smoothedScore state=$currentState perclos=$perclos blinkRate=$blinkRate yawning=$isCurrentlyYawning")
 
@@ -158,9 +192,6 @@ class FatigueScorer {
         return createAssessment(smoothedScore, currentTime, true, blinkRate, isCurrentlyYawning)
     }
 
-    /**
-     * Resets all internal buffers and state to initial values.
-     */
     fun reset() {
         perclosWindow.clear()
         blinkTimestamps.clear()
@@ -173,6 +204,23 @@ class FatigueScorer {
         currentState = FatigueState.NORMAL
         transitionStartTime = null
         targetState = null
+        calibrationStartMs = -1L
+        calibrationSamples.clear()
+        eyeClosedThreshold = EYE_CLOSED_THRESHOLD_DEFAULT
+        eyeOpenThreshold = EYE_OPEN_THRESHOLD_DEFAULT
+    }
+
+    private fun finishCalibration() {
+        if (calibrationSamples.size < CALIBRATION_MIN_SAMPLES) {
+            Log.w("FatigueScorer", "Calibration skipped: only ${calibrationSamples.size} samples, keeping defaults")
+            return
+        }
+        val sorted = calibrationSamples.sorted()
+        val p90Index = ((sorted.size - 1) * 0.90f).toInt()
+        val baseline = sorted[p90Index]
+        eyeClosedThreshold = (baseline * EYE_CLOSED_RATIO).coerceIn(EYE_CLOSED_MIN, EYE_CLOSED_MAX)
+        eyeOpenThreshold = (eyeClosedThreshold + 0.10f).coerceIn(eyeClosedThreshold + 0.05f, 0.55f)
+        Log.d("FatigueScorer", "Calibration done: baseline=$baseline closed=$eyeClosedThreshold open=$eyeOpenThreshold samples=${calibrationSamples.size}")
     }
 
     private fun calculateBlinkDeviationScore(blinkRate: Float): Float {
@@ -183,7 +231,7 @@ class FatigueScorer {
                 val maxDeviation = BLINK_RATE_MIN - BLINK_DEVIATION_LIMIT_LOW
                 (deviation / maxDeviation).coerceIn(0f, 1f)
             }
-            else -> { // blinkRate > BLINK_RATE_MAX
+            else -> {
                 val deviation = blinkRate - BLINK_RATE_MAX
                 val maxDeviation = BLINK_DEVIATION_LIMIT_HIGH - BLINK_RATE_MAX
                 (deviation / maxDeviation).coerceIn(0f, 1f)
@@ -194,9 +242,8 @@ class FatigueScorer {
     private fun updateState(score: Float, currentTime: Long) {
         val (newTargetState, requiredDuration) = when (currentState) {
             FatigueState.NORMAL -> {
-                if (score > TRANSITION_NORMAL_TO_WARNING_SCORE) {
-                    FatigueState.WARNING to TRANSITION_NORMAL_TO_WARNING_MS
-                } else null to 0L
+                if (score > TRANSITION_NORMAL_TO_WARNING_SCORE) FatigueState.WARNING to TRANSITION_NORMAL_TO_WARNING_MS
+                else null to 0L
             }
             FatigueState.WARNING -> {
                 when {
@@ -206,11 +253,10 @@ class FatigueScorer {
                 }
             }
             FatigueState.FATIGUED -> {
-                if (score < TRANSITION_FATIGUED_TO_WARNING_SCORE) {
-                    FatigueState.WARNING to TRANSITION_FATIGUED_TO_WARNING_MS
-                } else null to 0L
+                if (score < TRANSITION_FATIGUED_TO_WARNING_SCORE) FatigueState.WARNING to TRANSITION_FATIGUED_TO_WARNING_MS
+                else null to 0L
             }
-            FatigueState.NO_FACE -> null to 0L
+            FatigueState.NO_FACE, FatigueState.CALIBRATING -> null to 0L
         }
 
         if (newTargetState != null) {
@@ -235,7 +281,7 @@ class FatigueScorer {
         timestampMs: Long,
         isFaceDetected: Boolean,
         blinkRate: Float,
-        isYawning: Boolean
+        isYawning: Boolean,
     ): FatigueAssessment {
         return FatigueAssessment(
             score = score.coerceIn(0f, 100f),
@@ -243,7 +289,7 @@ class FatigueScorer {
             blinkRate = blinkRate,
             isYawning = isYawning,
             isFaceDetected = isFaceDetected,
-            timestampMs = timestampMs
+            timestampMs = timestampMs,
         )
     }
 }
