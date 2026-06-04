@@ -18,7 +18,6 @@ data class SetupUiState(
     val isCameraPermissionGranted: Boolean = false,
     val isLocationPermissionGranted: Boolean = false,
     val isCalibrationEnabled: Boolean = false,
-    val isVideoEnabled: Boolean = false,
     val canStartMonitoring: Boolean = false,
 )
 
@@ -71,13 +70,6 @@ class SetupViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun onCalibrationToggled(enabled: Boolean) {
         _uiState.update { it.copy(isCalibrationEnabled = enabled) }
-    }
-
-    /**
-     * Toggles video recording during sessions.
-     */
-    fun onVideoToggled(enabled: Boolean) {
-        _uiState.update { it.copy(isVideoEnabled = enabled) }
     }
 
     /**

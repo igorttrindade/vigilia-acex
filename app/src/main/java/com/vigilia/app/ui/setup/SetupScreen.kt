@@ -57,7 +57,6 @@ fun SetupScreen(
         SetupContent(
             uiState = uiState,
             onCalibrationToggled = viewModel::onCalibrationToggled,
-            onVideoToggled = viewModel::onVideoToggled,
             onRequestPermissions = {
                 permissionLauncher.launch(
                     arrayOf(
@@ -90,7 +89,6 @@ fun SetupScreen(
 fun SetupContent(
     uiState: SetupUiState,
     onCalibrationToggled: (Boolean) -> Unit,
-    onVideoToggled: (Boolean) -> Unit,
     onRequestPermissions: () -> Unit,
     onStartMonitoring: () -> Unit,
 ) {
@@ -252,17 +250,6 @@ fun SetupContent(
                     subtitle = "Adapta os limites ao seu rosto (5-10s)",
                     checked = uiState.isCalibrationEnabled,
                     onCheckedChange = onCalibrationToggled,
-                )
-                HorizontalDivider(
-                    color = BackgroundDark,
-                    thickness = 1.dp,
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                )
-                ToggleRow(
-                    title = "Gravar sessão em vídeo",
-                    subtitle = "Desativado por padrão",
-                    checked = uiState.isVideoEnabled,
-                    onCheckedChange = onVideoToggled,
                 )
             }
         }
@@ -446,7 +433,6 @@ fun SetupScreenPreview() {
                 isCameraPermissionGranted = true,
             ),
             onCalibrationToggled = {},
-            onVideoToggled = {},
             onRequestPermissions = {},
         ) {
             // onStartMonitoring
