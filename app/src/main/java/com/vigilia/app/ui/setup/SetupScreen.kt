@@ -18,6 +18,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.PlayArrow
@@ -61,6 +62,7 @@ fun SetupScreen(
                 permissionLauncher.launch(
                     arrayOf(
                         android.Manifest.permission.CAMERA,
+                        android.Manifest.permission.ACCESS_FINE_LOCATION,
                     ),
                 )
             },
@@ -182,6 +184,18 @@ fun SetupContent(
                     title = "Câmera",
                     isGranted = uiState.isCameraPermissionGranted,
                 )
+                HorizontalDivider(
+                    color = BackgroundDark,
+                    thickness = 1.dp,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
+                PermissionRow(
+                    icon = Icons.Default.LocationOn,
+                    title = "Localização",
+                    subtitle = "Para telemetria GPS e velocidade",
+                    isGranted = uiState.isLocationPermissionGranted,
+                    required = false,
+                )
             }
         }
 
@@ -296,6 +310,8 @@ fun PermissionRow(
     icon: ImageVector,
     title: String,
     isGranted: Boolean,
+    subtitle: String? = null,
+    required: Boolean = true,
 ) {
     Row(
         modifier = Modifier
@@ -328,7 +344,12 @@ fun PermissionRow(
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
-                text = if (isGranted) "Permissão concedida" else "Permissão necessária",
+                text = when {
+                    isGranted -> "Permissão concedida"
+                    subtitle != null -> subtitle
+                    required -> "Permissão necessária"
+                    else -> "Opcional"
+                },
                 color = if (isGranted) NormalGreen else TextSecondary,
                 fontSize = 12.sp,
             )

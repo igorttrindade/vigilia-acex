@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.update
  */
 data class SetupUiState(
     val isCameraPermissionGranted: Boolean = false,
+    val isLocationPermissionGranted: Boolean = false,
     val isCalibrationEnabled: Boolean = false,
     val isVideoEnabled: Boolean = false,
     val canStartMonitoring: Boolean = false,
@@ -36,30 +37,30 @@ class SetupViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun checkInitialPermissions() {
-        val cameraGranted = ContextCompat.checkSelfPermission(
-            getApplication(),
-            Manifest.permission.CAMERA,
-        ) == PackageManager.PERMISSION_GRANTED
+        val ctx = getApplication<Application>()
+        val cameraGranted = ContextCompat.checkSelfPermission(ctx, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        val locationGranted = ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
         _uiState.update {
             it.copy(
                 isCameraPermissionGranted = cameraGranted,
+                isLocationPermissionGranted = locationGranted,
                 canStartMonitoring = cameraGranted,
             )
         }
     }
 
-    /**
-     * Updates permission states based on the result from the OS.
-     *
-     * @param granted Map of permission names to their granted status.
-     */
     fun onPermissionsResult(granted: Map<String, Boolean>) {
         val cameraGranted = granted[Manifest.permission.CAMERA] ?: _uiState.value.isCameraPermissionGranted
+        val locationGranted = granted[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                granted[Manifest.permission.ACCESS_COARSE_LOCATION] == true ||
+                _uiState.value.isLocationPermissionGranted
 
         _uiState.update {
             it.copy(
                 isCameraPermissionGranted = cameraGranted,
+                isLocationPermissionGranted = locationGranted,
                 canStartMonitoring = cameraGranted,
             )
         }

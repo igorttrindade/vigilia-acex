@@ -86,11 +86,10 @@ class MonitoringService : Service(), LifecycleOwner {
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
-            result.lastLocation?.let { loc ->
-                lastLatitude = loc.latitude
-                lastLongitude = loc.longitude
-                lastSpeed = if (loc.hasSpeed()) loc.speed else null
-            }
+            val loc = result.locations.lastOrNull() ?: return
+            lastLatitude = loc.latitude
+            lastLongitude = loc.longitude
+            lastSpeed = if (loc.hasSpeed()) loc.speed else null
         }
     }
 
