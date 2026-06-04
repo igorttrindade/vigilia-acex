@@ -39,5 +39,7 @@ data class TelemetryRecord(
     val blinkRate: Float,
     val isYawning: Boolean,
     val isFaceDetected: Boolean,
-    val alertActive: Boolean
+    val alertActive: Boolean,
+    val latitude: Double? = null,
+    val longitude: Double? = null,
 )

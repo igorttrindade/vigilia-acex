@@ -115,6 +115,8 @@ class SyncRepository(private val context: Context) {
                 isYawning = p[6].toBoolean(),
                 isFaceDetected = p[7].toBoolean(),
                 alertActive = p[8].toBoolean(),
+                latitude = if (p.size > 9) p[9].toDoubleOrNull() else null,
+                longitude = if (p.size > 10) p[10].toDoubleOrNull() else null,
             )
         } catch (_: Exception) { null }
     }

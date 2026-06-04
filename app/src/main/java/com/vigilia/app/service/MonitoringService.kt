@@ -1,16 +1,19 @@
 package com.vigilia.app.service
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.Ringtone
 import android.media.RingtoneManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
 import androidx.camera.core.Preview
@@ -19,6 +22,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
+import com.google.android.gms.location.*
 import com.vigilia.app.camera.CameraManager
 import com.vigilia.app.data.repository.SyncRepository
 import com.vigilia.app.data.telemetry.TelemetryWriter
@@ -55,16 +59,27 @@ class MonitoringService : Service(), LifecycleOwner {
 
     private lateinit var lifecycleRegistry: LifecycleRegistry
     private lateinit var serviceScope: CoroutineScope
-    
+
     private lateinit var cameraManager: CameraManager
     private lateinit var scorer: FatigueScorer
     private lateinit var telemetryWriter: TelemetryWriter
-    
+    private lateinit var fusedLocationClient: FusedLocationProviderClient
+
     private var wakeLock: PowerManager.WakeLock? = null
     private var ringtone: Ringtone? = null
     private var alertJob: Job? = null
-    @Volatile
-    private var lastAlertTimeMs = 0L
+    @Volatile private var lastAlertTimeMs = 0L
+    @Volatile private var lastLatitude: Double? = null
+    @Volatile private var lastLongitude: Double? = null
+
+    private val locationCallback = object : LocationCallback() {
+        override fun onLocationResult(result: LocationResult) {
+            result.lastLocation?.let { loc ->
+                lastLatitude = loc.latitude
+                lastLongitude = loc.longitude
+            }
+        }
+    }
 
     @Volatile
     private var sessionId: String? = null
@@ -88,7 +103,8 @@ class MonitoringService : Service(), LifecycleOwner {
         cameraManager = CameraManager(this)
         scorer = FatigueScorer()
         telemetryWriter = TelemetryWriter(this)
-        
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+
         createNotificationChannel()
     }
 
@@ -106,6 +122,7 @@ class MonitoringService : Service(), LifecycleOwner {
         isProcessRunning = true
         startForeground(NOTIFICATION_ID, createNotification("Iniciando monitoramento..."))
         acquireWakeLock()
+        startLocationUpdates()
         
         serviceScope.launch {
             try {
@@ -135,9 +152,10 @@ class MonitoringService : Service(), LifecycleOwner {
         
         isProcessRunning = false
         currentAssessment.value = null
-        
+        stopLocationUpdates()
+
         stopForeground(STOP_FOREGROUND_REMOVE)
-        
+
         stopSelf()
     }
 
@@ -178,6 +196,8 @@ class MonitoringService : Service(), LifecycleOwner {
                         isYawning = assessment.isYawning,
                         isFaceDetected = assessment.isFaceDetected,
                         alertActive = isAlertActive(),
+                        latitude = lastLatitude,
+                        longitude = lastLongitude,
                     )
                 )
             }
@@ -215,6 +235,23 @@ class MonitoringService : Service(), LifecycleOwner {
     }
 
     private fun isAlertActive(): Boolean = ringtone?.isPlaying == true
+
+    private fun startLocationUpdates() {
+        val hasFine = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val hasCoarse = checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (!hasFine && !hasCoarse) return
+        val priority = if (hasFine) Priority.PRIORITY_HIGH_ACCURACY else Priority.PRIORITY_BALANCED_POWER_ACCURACY
+        val request = LocationRequest.Builder(priority, 5_000L)
+            .setMinUpdateIntervalMillis(5_000L)
+            .build()
+        fusedLocationClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper())
+    }
+
+    private fun stopLocationUpdates() {
+        fusedLocationClient.removeLocationUpdates(locationCallback)
+        lastLatitude = null
+        lastLongitude = null
+    }
 
     private fun acquireWakeLock() {
         val powerManager = getSystemService(POWER_SERVICE) as PowerManager

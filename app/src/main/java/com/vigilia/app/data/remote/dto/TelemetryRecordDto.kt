@@ -16,4 +16,6 @@ data class TelemetryRecordDto(
     @SerialName("is_yawning") val isYawning: Boolean,
     @SerialName("is_face_detected") val isFaceDetected: Boolean,
     @SerialName("alert_active") val alertActive: Boolean,
+    @SerialName("latitude") val latitude: Double? = null,
+    @SerialName("longitude") val longitude: Double? = null,
 )

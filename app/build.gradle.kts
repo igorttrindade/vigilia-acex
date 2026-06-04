@@ -82,6 +82,7 @@ dependencies {
     implementation(libs.supabase.auth)
     implementation(libs.supabase.postgrest)
     implementation(libs.ktor.android)
+    implementation(libs.play.services.location)
 
     testImplementation("org.json:json:20231013")
     testImplementation(libs.junit)
