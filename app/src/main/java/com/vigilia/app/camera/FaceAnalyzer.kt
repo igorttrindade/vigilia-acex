@@ -1,45 +1,46 @@
 package com.vigilia.app.camera
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.face.FaceDetection
-import com.google.mlkit.vision.face.FaceDetectorOptions
-import com.google.mlkit.vision.face.FaceLandmark
+import com.google.mediapipe.framework.image.MediaImageBuilder
+import com.google.mediapipe.tasks.core.BaseOptions
+import com.google.mediapipe.tasks.vision.core.ImageProcessingOptions
+import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
 import com.vigilia.app.domain.model.FatigueMetrics
-import kotlin.math.abs
 
 /**
- * Extracts face metrics from camera frames using ML Kit Face Detection.
+ * Extracts face metrics from camera frames using MediaPipe FaceLandmarker.
  *
- * This analyzer processes individual [ImageProxy] frames, identifies the primary face,
- * and extracts eye openness and mouth opening probabilities.
+ * Uses 478-point face mesh with BlendShape coefficients:
+ * - [eyeBlinkLeft] / [eyeBlinkRight]: 0=open, 1=closed — inverted to produce eye-open probability
+ * - [jawOpen]: 0=closed, 1=fully open — used directly as mouth-open probability for yawn detection
  *
- * Mouth opening is calculated from the vertical distance between [FaceLandmark.NOSE_BASE]
- * and [FaceLandmark.MOUTH_BOTTOM], normalised by face height. This requires
- * [FaceDetectorOptions.LANDMARK_MODE_ALL] and replaces the former smiling-probability proxy,
- * which conflated smiling with yawning and produced unreliable fatigue signals.
- *
- * Note: ML Kit does not expose a MOUTH_TOP landmark. NOSE_BASE (bottom of the nose bridge)
- * is the closest stable upper reference — the nose-to-lower-lip distance reliably increases
- * as the jaw drops during a yawn.
- *
- * @param onMetricsAvailable Callback emitted for every processed frame (with or without a face).
+ * @param context Used to load the bundled model asset.
+ * @param onMetricsAvailable Callback emitted for every processed frame.
  */
 class FaceAnalyzer(
+    context: Context,
     private val onMetricsAvailable: (FatigueMetrics) -> Unit,
 ) : ImageAnalysis.Analyzer {
 
-    private val options = FaceDetectorOptions.Builder()
-        .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-        .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
-        .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
-        .setMinFaceSize(0.15f)
-        .build()
-
-    private val detector = FaceDetection.getClient(options)
+    private val faceLandmarker: FaceLandmarker = run {
+        val baseOptions = BaseOptions.builder()
+            .setModelAssetPath(MODEL_ASSET_PATH)
+            .build()
+        val options = FaceLandmarker.FaceLandmarkerOptions.builder()
+            .setBaseOptions(baseOptions)
+            .setRunningMode(RunningMode.IMAGE)
+            .setNumFaces(1)
+            .setOutputFaceBlendshapes(true)
+            .setMinFaceDetectionConfidence(0.5f)
+            .setMinFacePresenceConfidence(0.5f)
+            .build()
+        FaceLandmarker.createFromOptions(context, options)
+    }
 
     @SuppressLint("UnsafeOptInUsageError")
     override fun analyze(imageProxy: ImageProxy) {
@@ -49,68 +50,57 @@ class FaceAnalyzer(
             return
         }
 
-        val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
-
         try {
-            detector.process(image)
-                .addOnSuccessListener { faces ->
-                    val face = faces.firstOrNull()
-                    val metrics = if (face != null) {
-                        val noseBase = face.getLandmark(FaceLandmark.NOSE_BASE)
-                        val mouthBottom = face.getLandmark(FaceLandmark.MOUTH_BOTTOM)
-                        val mouthLeft = face.getLandmark(FaceLandmark.MOUTH_LEFT)
-                        val mouthRight = face.getLandmark(FaceLandmark.MOUTH_RIGHT)
+            val mpImage = MediaImageBuilder(mediaImage).build()
+            val imageOptions = ImageProcessingOptions.builder()
+                .setRotationDegrees(imageProxy.imageInfo.rotationDegrees)
+                .build()
 
-                        Log.d("FaceAnalyzer", "landmarks available: " +
-                            "MOUTH_BOTTOM=${mouthBottom != null} " +
-                            "MOUTH_LEFT=${mouthLeft != null} " +
-                            "MOUTH_RIGHT=${mouthRight != null} " +
-                            "NOSE_BASE=${noseBase != null}")
+            val result = faceLandmarker.detect(mpImage, imageOptions)
+            val blendshapesOpt = result.faceBlendshapes()
 
-                        val faceHeight = face.boundingBox.height().toFloat()
-                        val mouthOpenScore = if (faceHeight <= 0f) 0f else when {
-                            noseBase != null && mouthBottom != null -> {
-                                val distance = abs(noseBase.position.y - mouthBottom.position.y)
-                                (distance / faceHeight).coerceIn(0f, 1f)
-                            }
-                            noseBase != null && mouthLeft != null && mouthRight != null -> {
-                                val mouthCenterY = (mouthLeft.position.y + mouthRight.position.y) / 2f
-                                val distance = abs(noseBase.position.y - mouthCenterY)
-                                (distance / faceHeight).coerceIn(0f, 1f)
-                            }
-                            else -> 0f
-                        }
-                        FatigueMetrics(
-                            leftEyeOpenProbability = face.leftEyeOpenProbability ?: 0f,
-                            rightEyeOpenProbability = face.rightEyeOpenProbability ?: 0f,
-                            mouthOpenProbability = mouthOpenScore,
-                            isFaceDetected = true,
-                            timestampMs = System.nanoTime() / 1_000_000,
-                        )
-                    } else {
-                        createNoFaceMetrics()
-                    }
-                    onMetricsAvailable(metrics)
-                }
-                .addOnFailureListener { e ->
-                    Log.e("FaceAnalyzer", "Face detection failed", e)
-                    onMetricsAvailable(createNoFaceMetrics())
-                }
-                .addOnCompleteListener {
-                    imageProxy.close()
-                }
+            val metrics = if (blendshapesOpt.isPresent && blendshapesOpt.get().isNotEmpty()) {
+                val shapes = blendshapesOpt.get()[0]
+                val eyeBlinkLeft  = shapes.find { it.categoryName() == "eyeBlinkLeft"  }?.score() ?: 0f
+                val eyeBlinkRight = shapes.find { it.categoryName() == "eyeBlinkRight" }?.score() ?: 0f
+                val jawOpen       = shapes.find { it.categoryName() == "jawOpen"       }?.score() ?: 0f
+
+                Log.d("FaceAnalyzer", "blinkL=$eyeBlinkLeft blinkR=$eyeBlinkRight jawOpen=$jawOpen")
+
+                FatigueMetrics(
+                    leftEyeOpenProbability  = (1f - eyeBlinkLeft).coerceIn(0f, 1f),
+                    rightEyeOpenProbability = (1f - eyeBlinkRight).coerceIn(0f, 1f),
+                    mouthOpenProbability    = jawOpen,
+                    isFaceDetected          = true,
+                    timestampMs             = System.nanoTime() / 1_000_000,
+                )
+            } else {
+                createNoFaceMetrics()
+            }
+            onMetricsAvailable(metrics)
         } catch (e: Exception) {
-            Log.e("FaceAnalyzer", "Analysis process exception", e)
-            imageProxy.close()
+            Log.e("FaceAnalyzer", "Detection failed", e)
             onMetricsAvailable(createNoFaceMetrics())
+        } finally {
+            imageProxy.close()
         }
     }
 
+    fun close() = try {
+        faceLandmarker.close()
+    } catch (e: Exception) {
+        Log.w("FaceAnalyzer", "Close failed", e)
+    }
+
     private fun createNoFaceMetrics() = FatigueMetrics(
-        leftEyeOpenProbability = 0f,
+        leftEyeOpenProbability  = 0f,
         rightEyeOpenProbability = 0f,
-        mouthOpenProbability = 0f,
-        isFaceDetected = false,
-        timestampMs = System.nanoTime() / 1_000_000,
+        mouthOpenProbability    = 0f,
+        isFaceDetected          = false,
+        timestampMs             = System.nanoTime() / 1_000_000,
     )
+
+    companion object {
+        private const val MODEL_ASSET_PATH = "face_landmarker.task"
+    }
 }

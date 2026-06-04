@@ -9,7 +9,7 @@ activityCompose = "1.13.0"
 kotlin = "2.3.21"
 composeBom = "2026.05.00"
 cameraX = "1.6.1"
-mlkitFace = "16.1.7"
+mediapipe = "0.10.14"
 navigationCompose = "2.9.8"
 lifecycleViewmodel = "2.10.0"
 supabase = "3.1.4"
@@ -35,7 +35,7 @@ camerax-core = { group = "androidx.camera", name = "camera-core", version.ref = 
 camerax-camera2 = { group = "androidx.camera", name = "camera-camera2", version.ref = "cameraX" }
 camerax-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "cameraX" }
 camerax-view = { group = "androidx.camera", name = "camera-view", version.ref = "cameraX" }
-mlkit-face = { group = "com.google.mlkit", name = "face-detection", version.ref = "mlkitFace" }
+mediapipe-tasks-vision = { group = "com.google.mediapipe", name = "tasks-vision", version.ref = "mediapipe" }
 navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigationCompose" }
 lifecycle-viewmodel = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycleViewmodel" }
 supabase-auth = { group = "io.github.jan-tennert.supabase", name = "auth-kt", version.ref = "supabase" }

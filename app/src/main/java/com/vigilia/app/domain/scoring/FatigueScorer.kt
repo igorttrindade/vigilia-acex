@@ -20,7 +20,7 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
     private companion object {
         const val PERCLOS_WINDOW_MS = 20_000L
         const val BLINK_WINDOW_MS = 60_000L
-        const val YAWN_THRESHOLD_PROB = 0.7f
+        const val YAWN_THRESHOLD_PROB = 0.5f
         const val YAWN_DURATION_MS = 2_000L
         const val YAWN_RESET_MS = 5_000L
         const val SMOOTHING_ALPHA = 0.3f

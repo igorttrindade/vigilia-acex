@@ -24,8 +24,8 @@ class CameraManager(private val context: Context) {
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var analysisExecutor: ExecutorService? = null
-    
-    // Track active use cases to allow partial unbinding
+    private var faceAnalyzer: FaceAnalyzer? = null
+
     private var currentPreview: Preview? = null
     private var currentAnalysis: ImageAnalysis? = null
 
@@ -55,7 +55,8 @@ class CameraManager(private val context: Context) {
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
             .also {
-                it.setAnalyzer(analysisExecutor!!, FaceAnalyzer(onMetricsAvailable))
+                faceAnalyzer = FaceAnalyzer(context, onMetricsAvailable)
+                it.setAnalyzer(analysisExecutor!!, faceAnalyzer!!)
             }
 
         if (surfaceProvider != null) {
@@ -130,6 +131,8 @@ class CameraManager(private val context: Context) {
         cameraProvider?.unbindAll()
         analysisExecutor?.shutdownNow()
         analysisExecutor = null
+        faceAnalyzer?.close()
+        faceAnalyzer = null
         currentPreview = null
         currentAnalysis = null
     }

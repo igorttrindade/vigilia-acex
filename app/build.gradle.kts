@@ -69,8 +69,8 @@ dependencies {
     implementation(libs.camerax.lifecycle)
     implementation(libs.camerax.view)
 
-    // ML Kit
-    implementation(libs.mlkit.face)
+    // MediaPipe
+    implementation(libs.mediapipe.tasks.vision)
 
     // Navigation
     implementation(libs.navigation.compose)
