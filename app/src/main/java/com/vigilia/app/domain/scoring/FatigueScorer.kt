@@ -30,8 +30,8 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         const val EYE_OPEN_THRESHOLD_DEFAULT = 0.4f
 
         const val SCORE_WEIGHT_PERCLOS = 50f
-        const val SCORE_WEIGHT_BLINK = 30f
-        const val SCORE_WEIGHT_YAWN = 20f
+        const val SCORE_WEIGHT_BLINK = 20f
+        const val SCORE_WEIGHT_YAWN = 25f
 
         const val BLINK_RATE_MIN = 15f
         const val BLINK_RATE_MAX = 20f
@@ -177,12 +177,14 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
 
         // 4. Score Calculation
         val perclosContribution = perclos * SCORE_WEIGHT_PERCLOS
-        val blinkContribution = calculateBlinkDeviationScore(blinkRate) * SCORE_WEIGHT_BLINK
+        // Suppress blink penalty while no blinks have been detected yet — avoids false
+        // fatigue signals in the first frames when the 60-second window is still empty.
+        val blinkContribution = if (blinkTimestamps.isEmpty()) 0f
+            else calculateBlinkDeviationScore(blinkRate) * SCORE_WEIGHT_BLINK
         val yawnContribution = if (isCurrentlyYawning) SCORE_WEIGHT_YAWN else 0f
 
         val rawScore = perclosContribution + blinkContribution + yawnContribution
-        smoothedScore = if (smoothedScore == 0f && rawScore > 0) rawScore
-        else (SMOOTHING_ALPHA * rawScore) + (1f - SMOOTHING_ALPHA) * smoothedScore
+        smoothedScore = (SMOOTHING_ALPHA * rawScore) + (1f - SMOOTHING_ALPHA) * smoothedScore
 
         Log.d("FatigueScorer", "score=$smoothedScore state=$currentState perclos=$perclos blinkRate=$blinkRate yawning=$isCurrentlyYawning")
 
