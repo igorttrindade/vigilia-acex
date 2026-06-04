@@ -12,6 +12,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -113,6 +114,28 @@ fun AuthScreen(
         )
 
         Spacer(modifier = Modifier.height(40.dp))
+
+        // Full name field — only visible on sign-up
+        if (isSignUpMode) {
+            OutlinedTextField(
+                value = uiState.fullName,
+                onValueChange = viewModel::onFullNameChanged,
+                label = { Text("Nome completo") },
+                singleLine = true,
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Default.Person,
+                        contentDescription = null,
+                        tint = TextSecondary,
+                    )
+                },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                modifier = Modifier.fillMaxWidth(),
+                colors = authTextFieldColors(),
+                shape = RoundedCornerShape(12.dp),
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+        }
 
         // Email field
         OutlinedTextField(

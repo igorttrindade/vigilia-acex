@@ -15,6 +15,7 @@ data class AuthUiState(
     val errorMessage: String? = null,
     val email: String = "",
     val password: String = "",
+    val fullName: String = "",
 )
 
 /** Manages email/password authentication state for [AuthScreen]. */
@@ -35,6 +36,10 @@ class AuthViewModel : ViewModel() {
         _uiState.update { it.copy(password = password) }
     }
 
+    fun onFullNameChanged(fullName: String) {
+        _uiState.update { it.copy(fullName = fullName) }
+    }
+
     fun signIn() {
         val state = _uiState.value
         _uiState.update { it.copy(isLoading = true, errorMessage = null) }
@@ -51,7 +56,7 @@ class AuthViewModel : ViewModel() {
         val state = _uiState.value
         _uiState.update { it.copy(isLoading = true, errorMessage = null) }
         viewModelScope.launch {
-            authRepository.signUp(state.email, state.password)
+            authRepository.signUp(state.email, state.password, state.fullName)
                 .onSuccess { _uiState.update { it.copy(isLoading = false, isLoggedIn = true) } }
                 .onFailure { e ->
                     _uiState.update { it.copy(isLoading = false, errorMessage = e.message ?: "Erro ao criar conta") }
