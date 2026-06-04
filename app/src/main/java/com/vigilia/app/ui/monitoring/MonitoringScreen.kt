@@ -88,10 +88,10 @@ fun MonitoringScreen(
     // Bind to service lifecycle
     DisposableEffect(Unit) {
         val intent = android.content.Intent(context, MonitoringService::class.java)
-        context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        val bound = context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
         onDispose {
             boundService?.detachPreview()
-            context.unbindService(connection)
+            if (bound) context.unbindService(connection)
         }
     }
 

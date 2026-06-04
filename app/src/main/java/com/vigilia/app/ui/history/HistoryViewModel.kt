@@ -3,6 +3,7 @@ package com.vigilia.app.ui.history
 import android.app.Application
 import android.content.ClipData
 import android.content.Intent
+import android.net.Uri
 import android.util.Log
 import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
@@ -69,18 +70,21 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
             val folder = repository.getSessionFolder(sessionId)
             if (!folder.exists()) return
 
-            val csvFile = folder.listFiles()?.firstOrNull { it.extension == "csv" } ?: return
+            val files = folder.listFiles()?.filter { it.extension == "csv" || it.extension == "json" }
+            if (files.isNullOrEmpty()) return
 
-            val uri = FileProvider.getUriForFile(
-                getApplication(),
-                "com.vigilia.app.fileprovider",
-                csvFile,
-            )
+            val uris = ArrayList<Uri>(files.map { file ->
+                FileProvider.getUriForFile(getApplication(), "com.vigilia.app.fileprovider", file)
+            })
 
-            val intent = Intent(Intent.ACTION_SEND).apply {
-                type = "text/csv"
-                putExtra(Intent.EXTRA_STREAM, uri)
-                clipData = ClipData.newRawUri(null, uri)
+            val clipData = ClipData.newRawUri(null, uris[0]).also { clip ->
+                uris.drop(1).forEach { clip.addItem(ClipData.Item(it)) }
+            }
+
+            val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                type = "*/*"
+                putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                this.clipData = clipData
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
 

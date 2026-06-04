@@ -161,6 +161,6 @@ class MonitoringViewModel : ViewModel() {
     fun stopMonitoring(context: Context) {
         ServiceController.stopMonitoring(context)
         stopTimer()
-        _uiState.update { it.copy(isMonitoringActive = false) }
+        _uiState.update { it.copy(isMonitoringActive = false, alertCount = 0) }
     }
 }

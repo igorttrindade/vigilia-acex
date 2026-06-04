@@ -64,6 +64,7 @@ class MonitoringService : Service(), LifecycleOwner {
 
     private lateinit var lifecycleRegistry: LifecycleRegistry
     private lateinit var serviceScope: CoroutineScope
+    private val writerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private lateinit var cameraManager: CameraManager
     private lateinit var scorer: FatigueScorer
@@ -212,9 +213,9 @@ class MonitoringService : Service(), LifecycleOwner {
         val previousAssessment = currentAssessment.value
         if (assessment.fatigueState != previousAssessment?.fatigueState) {
             if (assessment.fatigueState == FatigueState.WARNING || assessment.fatigueState == FatigueState.FATIGUED) {
-                triggerAlert()
+                serviceScope.launch { triggerAlert() }
             } else if (assessment.fatigueState == FatigueState.NORMAL || assessment.fatigueState == FatigueState.NO_FACE) {
-                stopAlert()
+                serviceScope.launch { stopAlert() }
             }
         }
 
@@ -222,7 +223,8 @@ class MonitoringService : Service(), LifecycleOwner {
         if ((currentTime - lastTelemetryWriteTime) >= telemetryIntervalMs) {
             val sId = sessionId ?: return
             lastTelemetryWriteTime = currentTime
-            serviceScope.launch {
+            val alertActive = ringtone?.isPlaying == true
+            writerScope.launch {
                 telemetryWriter.writeRecord(
                     TelemetryRecord(
                         sessionId = sId,
@@ -233,7 +235,7 @@ class MonitoringService : Service(), LifecycleOwner {
                         blinkRate = assessment.blinkRate,
                         isYawning = assessment.isYawning,
                         isFaceDetected = assessment.isFaceDetected,
-                        alertActive = isAlertActive(),
+                        alertActive = alertActive,
                         latitude = lastLatitude,
                         longitude = lastLongitude,
                         speed = lastSpeed,
@@ -278,8 +280,6 @@ class MonitoringService : Service(), LifecycleOwner {
         alertJob?.cancel()
         alertJob = null
     }
-
-    private fun isAlertActive(): Boolean = ringtone?.isPlaying == true
 
     private fun startSensorUpdates() {
         sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
@@ -365,10 +365,12 @@ class MonitoringService : Service(), LifecycleOwner {
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
+                // stopSession() acquires writeMutex — pending writerScope writes finish first
                 telemetryWriter.stopSession()
             } catch (e: Exception) {
                 Log.e("MonitoringService", "Stop session failed", e)
             }
+            writerScope.cancel()
             try {
                 withTimeout(15_000L) {
                     SyncRepository(this@MonitoringService).syncPendingSessions()

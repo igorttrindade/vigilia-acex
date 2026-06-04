@@ -38,7 +38,10 @@ class CameraManager(private val context: Context) {
         surfaceProvider: Preview.SurfaceProvider? = null,
     ) {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-        
+
+        faceAnalyzer?.close()
+        faceAnalyzer = null
+        analysisExecutor?.shutdownNow()
         analysisExecutor = Executors.newSingleThreadExecutor()
 
         val resolutionSelector = ResolutionSelector.Builder()
