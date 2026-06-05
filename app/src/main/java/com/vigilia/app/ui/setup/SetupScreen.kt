@@ -197,7 +197,7 @@ fun SetupContent(
             }
         }
 
-        if (!uiState.isCameraPermissionGranted) {
+        if (!uiState.isCameraPermissionGranted || !uiState.isLocationPermissionGranted) {
             Spacer(modifier = Modifier.height(14.dp))
             Button(
                 onClick = onRequestPermissions,

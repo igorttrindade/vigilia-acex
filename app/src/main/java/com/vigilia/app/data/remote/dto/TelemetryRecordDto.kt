@@ -8,7 +8,7 @@ import kotlinx.serialization.Serializable
 data class TelemetryRecordDto(
     @SerialName("session_id") val sessionId: String,
     @SerialName("user_id") val userId: String,
-    @SerialName("timestamp") val timestamp: Long,
+    @SerialName("timestamp") val timestamp: String,
     @SerialName("score") val score: Float,
     @SerialName("state") val state: String,
     @SerialName("eye_openness") val eyeOpenness: Float,
