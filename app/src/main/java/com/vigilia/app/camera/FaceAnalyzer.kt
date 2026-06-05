@@ -1,11 +1,10 @@
 package com.vigilia.app.camera
 
-import android.annotation.SuppressLint
 import android.content.Context
 import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
-import com.google.mediapipe.framework.image.MediaImageBuilder
+import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.ImageProcessingOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
@@ -36,22 +35,18 @@ class FaceAnalyzer(
             .setRunningMode(RunningMode.IMAGE)
             .setNumFaces(1)
             .setOutputFaceBlendshapes(true)
-            .setMinFaceDetectionConfidence(0.5f)
-            .setMinFacePresenceConfidence(0.5f)
+            .setMinFaceDetectionConfidence(0.3f)
+            .setMinFacePresenceConfidence(0.3f)
             .build()
         FaceLandmarker.createFromOptions(context, options)
     }
 
-    @SuppressLint("UnsafeOptInUsageError")
     override fun analyze(imageProxy: ImageProxy) {
-        val mediaImage = imageProxy.image
-        if (mediaImage == null) {
-            imageProxy.close()
-            return
-        }
-
         try {
-            val mpImage = MediaImageBuilder(mediaImage).build()
+            // toBitmap() converts YUV_420_888 → ARGB_8888, avoiding MediaImageBuilder
+            // compatibility issues across devices and CameraX versions.
+            val bitmap = imageProxy.toBitmap()
+            val mpImage = BitmapImageBuilder(bitmap).build()
             val imageOptions = ImageProcessingOptions.builder()
                 .setRotationDegrees(imageProxy.imageInfo.rotationDegrees)
                 .build()
