@@ -300,12 +300,36 @@ class MonitoringService : Service(), LifecycleOwner {
     private fun startLocationUpdates() {
         val hasFine = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
         val hasCoarse = checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        if (!hasFine && !hasCoarse) return
+        if (!hasFine && !hasCoarse) {
+            Log.w("MonitoringService", "Location permission not granted, skipping location updates")
+            return
+        }
+
+        // Immediately populate from the last cached location so early records aren't empty
+        fusedLocationClient.lastLocation
+            .addOnSuccessListener { loc ->
+                if (loc != null) {
+                    lastLatitude = loc.latitude
+                    lastLongitude = loc.longitude
+                    lastSpeed = if (loc.hasSpeed()) loc.speed else null
+                    Log.d("MonitoringService", "Last known location: lat=$lastLatitude lon=$lastLongitude")
+                } else {
+                    Log.d("MonitoringService", "No cached location available")
+                }
+            }
+            .addOnFailureListener { e ->
+                Log.w("MonitoringService", "Failed to get last location", e)
+            }
+
+        // BALANCED uses WiFi/cell (works indoors); HIGH_ACCURACY adds GPS on top of that
         val priority = if (hasFine) Priority.PRIORITY_HIGH_ACCURACY else Priority.PRIORITY_BALANCED_POWER_ACCURACY
         val request = LocationRequest.Builder(priority, 5_000L)
-            .setMinUpdateIntervalMillis(5_000L)
+            .setMinUpdateIntervalMillis(3_000L)
             .build()
         fusedLocationClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper())
+            .addOnFailureListener { e ->
+                Log.e("MonitoringService", "requestLocationUpdates failed", e)
+            }
     }
 
     private fun stopLocationUpdates() {
