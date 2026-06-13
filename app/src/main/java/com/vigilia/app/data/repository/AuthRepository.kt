@@ -34,9 +34,10 @@ class AuthRepository {
 
     /** Sends a password reset email with a deep link back to the app. */
     suspend fun sendPasswordReset(email: String): Result<Unit> = runCatching {
-        SupabaseClient.client.auth.resetPasswordForEmail(email) {
-            redirectTo = "vigilia://reset-password"
-        }
+        SupabaseClient.client.auth.resetPasswordForEmail(
+            email = email,
+            redirectUrl = "vigilia://reset-password",
+        )
     }
 
     /** Updates the password of the currently authenticated user. */
