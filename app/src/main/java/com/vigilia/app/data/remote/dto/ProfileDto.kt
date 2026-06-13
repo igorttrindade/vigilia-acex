@@ -6,5 +6,5 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class ProfileDto(
     @SerialName("id") val id: String,
-    @SerialName("fullname") val fullname: String,
+    @SerialName("full_name") val fullname: String,
 )
