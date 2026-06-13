@@ -157,6 +157,10 @@ fun AuthScreen(
             onValueChange = viewModel::onPasswordChanged,
             label = { Text("Senha") },
             singleLine = true,
+            isError = uiState.passwordError != null,
+            supportingText = uiState.passwordError?.let { msg ->
+                { Text(text = msg, color = AlertRed, fontSize = 12.sp) }
+            },
             visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
             trailingIcon = {
@@ -249,4 +253,8 @@ private fun authTextFieldColors() = OutlinedTextFieldDefaults.colors(
     unfocusedTextColor = TextPrimary,
     unfocusedContainerColor = Color(0xFF1A1A1A),
     focusedContainerColor = Color(0xFF1A1A1A),
+    errorBorderColor = AlertRed,
+    errorLabelColor = AlertRed,
+    errorCursorColor = AlertRed,
+    errorContainerColor = Color(0xFF1A1A1A),
 )

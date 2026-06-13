@@ -13,6 +13,7 @@ data class AuthUiState(
     val isLoading: Boolean = false,
     val isLoggedIn: Boolean = false,
     val errorMessage: String? = null,
+    val passwordError: String? = null,
     val email: String = "",
     val password: String = "",
     val fullName: String = "",
@@ -33,14 +34,23 @@ class AuthViewModel : ViewModel() {
     }
 
     fun onPasswordChanged(password: String) {
-        _uiState.update { it.copy(password = password) }
+        _uiState.update { it.copy(password = password, passwordError = null) }
     }
 
     fun onFullNameChanged(fullName: String) {
         _uiState.update { it.copy(fullName = fullName) }
     }
 
+    private fun validatePassword(): Boolean {
+        if (_uiState.value.password.length < 8) {
+            _uiState.update { it.copy(passwordError = "A senha deve ter pelo menos 8 caracteres") }
+            return false
+        }
+        return true
+    }
+
     fun signIn() {
+        if (!validatePassword()) return
         val state = _uiState.value
         _uiState.update { it.copy(isLoading = true, errorMessage = null) }
         viewModelScope.launch {
@@ -53,6 +63,7 @@ class AuthViewModel : ViewModel() {
     }
 
     fun signUp() {
+        if (!validatePassword()) return
         val state = _uiState.value
         _uiState.update { it.copy(isLoading = true, errorMessage = null) }
         viewModelScope.launch {
@@ -72,6 +83,6 @@ class AuthViewModel : ViewModel() {
     }
 
     fun clearError() {
-        _uiState.update { it.copy(errorMessage = null) }
+        _uiState.update { it.copy(errorMessage = null, passwordError = null) }
     }
 }

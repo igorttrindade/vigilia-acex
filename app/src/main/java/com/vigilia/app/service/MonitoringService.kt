@@ -158,12 +158,12 @@ class MonitoringService : Service(), LifecycleOwner {
         scorer = FatigueScorer(calibrationEnabled)
         isProcessRunning = true
         startForeground(NOTIFICATION_ID, createNotification("Iniciando monitoramento..."))
-        acquireWakeLock()
         startLocationUpdates()
         startSensorUpdates()
-        
+
         serviceScope.launch {
             try {
+                acquireWakeLock()
                 sessionId = telemetryWriter.startSession()
                 lifecycleRegistry.currentState = Lifecycle.State.RESUMED
                 

@@ -1,6 +1,8 @@
 package com.vigilia.app.camera
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -18,30 +20,54 @@ import com.vigilia.app.domain.model.FatigueMetrics
  * - [eyeBlinkLeft] / [eyeBlinkRight]: 0=open, 1=closed — inverted to produce eye-open probability
  * - [jawOpen]: 0=closed, 1=fully open — used directly as mouth-open probability for yawn detection
  *
+ * The FaceLandmarker model is initialized asynchronously on the main thread (which has a Looper,
+ * required by MediaPipe internally) via [Handler.post]. This avoids blocking the calling thread
+ * while still satisfying MediaPipe's threading requirements. Frames arriving before initialization
+ * completes are emitted as NO_FACE metrics.
+ *
  * @param context Used to load the bundled model asset.
  * @param onMetricsAvailable Callback emitted for every processed frame.
  */
 class FaceAnalyzer(
-    context: Context,
+    private val context: Context,
     private val onMetricsAvailable: (FatigueMetrics) -> Unit,
 ) : ImageAnalysis.Analyzer {
 
-    private val faceLandmarker: FaceLandmarker = run {
-        val baseOptions = BaseOptions.builder()
-            .setModelAssetPath(MODEL_ASSET_PATH)
-            .build()
-        val options = FaceLandmarker.FaceLandmarkerOptions.builder()
-            .setBaseOptions(baseOptions)
-            .setRunningMode(RunningMode.IMAGE)
-            .setNumFaces(1)
-            .setOutputFaceBlendshapes(true)
-            .setMinFaceDetectionConfidence(0.3f)
-            .setMinFacePresenceConfidence(0.3f)
-            .build()
-        FaceLandmarker.createFromOptions(context, options)
+    @Volatile private var faceLandmarker: FaceLandmarker? = null
+    @Volatile private var closed = false
+
+    init {
+        // FaceLandmarker.createFromOptions() requires a thread with a Looper; schedule on main.
+        // analyze() returns NO_FACE for the few frames that arrive before init completes.
+        Handler(Looper.getMainLooper()).post {
+            if (closed) return@post
+            try {
+                val baseOptions = BaseOptions.builder()
+                    .setModelAssetPath(MODEL_ASSET_PATH)
+                    .build()
+                val options = FaceLandmarker.FaceLandmarkerOptions.builder()
+                    .setBaseOptions(baseOptions)
+                    .setRunningMode(RunningMode.IMAGE)
+                    .setNumFaces(1)
+                    .setOutputFaceBlendshapes(true)
+                    .setMinFaceDetectionConfidence(0.3f)
+                    .setMinFacePresenceConfidence(0.3f)
+                    .build()
+                val lm = FaceLandmarker.createFromOptions(context, options)
+                if (closed) lm.close() else faceLandmarker = lm
+            } catch (e: Throwable) {
+                Log.e("FaceAnalyzer", "FaceLandmarker init failed — face detection disabled", e)
+            }
+        }
     }
 
     override fun analyze(imageProxy: ImageProxy) {
+        val landmarker = faceLandmarker
+        if (landmarker == null) {
+            onMetricsAvailable(createNoFaceMetrics())
+            imageProxy.close()
+            return
+        }
         try {
             // toBitmap() converts YUV_420_888 → ARGB_8888, avoiding MediaImageBuilder
             // compatibility issues across devices and CameraX versions.
@@ -51,7 +77,7 @@ class FaceAnalyzer(
                 .setRotationDegrees(imageProxy.imageInfo.rotationDegrees)
                 .build()
 
-            val result = faceLandmarker.detect(mpImage, imageOptions)
+            val result = landmarker.detect(mpImage, imageOptions)
             val blendshapesOpt = result.faceBlendshapes()
 
             val metrics = if (blendshapesOpt.isPresent && blendshapesOpt.get().isNotEmpty()) {
@@ -81,10 +107,13 @@ class FaceAnalyzer(
         }
     }
 
-    fun close() = try {
-        faceLandmarker.close()
-    } catch (e: Exception) {
-        Log.w("FaceAnalyzer", "Close failed", e)
+    fun close() {
+        closed = true
+        try {
+            faceLandmarker?.close()
+        } catch (e: Exception) {
+            Log.w("FaceAnalyzer", "Close failed", e)
+        }
     }
 
     private fun createNoFaceMetrics() = FatigueMetrics(
