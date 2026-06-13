@@ -20,11 +20,12 @@ class AuthRepository {
 
     /** Creates a new account with email, password and full name. Upserts the profile row immediately after auth. */
     suspend fun signUp(email: String, password: String, fullName: String): Result<Unit> = runCatching {
-        SupabaseClient.client.auth.signUpWith(Email) {
+        val user = SupabaseClient.client.auth.signUpWith(Email) {
             this.email = email
             this.password = password
         }
-        val userId = SupabaseClient.client.auth.currentUserOrNull()?.id
+        val userId = user?.id
+            ?: SupabaseClient.client.auth.currentUserOrNull()?.id
             ?: error("Usuário não encontrado após o cadastro")
         SupabaseClient.client.from("profiles").upsert(
             ProfileDto(id = userId, fullname = fullName)
