@@ -20,7 +20,7 @@ import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Logout
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Shield
@@ -77,7 +77,7 @@ fun SetupScreen(
                 .padding(top = 8.dp, end = 8.dp),
         ) {
             Icon(
-                imageVector = Icons.Default.Logout,
+                imageVector = Icons.AutoMirrored.Filled.Logout,
                 contentDescription = "Sair",
                 tint = com.vigilia.app.ui.theme.TextSecondary,
             )
