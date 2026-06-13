@@ -81,6 +81,8 @@ dependencies {
     // Supabase
     implementation(libs.supabase.auth)
     implementation(libs.supabase.postgrest)
+    releaseImplementation(libs.supabase.android)
+    debugImplementation("io.github.jan-tennert.supabase:supabase-kt-android-debug:3.1.4")
     implementation(libs.ktor.android)
     implementation(libs.play.services.location)
 
