@@ -32,6 +32,8 @@ import com.vigilia.app.data.repository.AuthRepository
 import com.vigilia.app.service.MonitoringService
 import com.vigilia.app.ui.auth.AuthScreen
 import com.vigilia.app.ui.auth.AuthViewModel
+import com.vigilia.app.ui.auth.ForgotPasswordScreen
+import com.vigilia.app.ui.auth.ResetPasswordScreen
 import com.vigilia.app.ui.history.HistoryScreen
 import com.vigilia.app.ui.history.HistoryViewModel
 import com.vigilia.app.ui.monitoring.MonitoringScreen
@@ -47,10 +49,16 @@ sealed class Screen(val route: String, val label: String, val icon: androidx.com
 }
 
 private const val ROUTE_AUTH = "auth"
+private const val ROUTE_FORGOT_PASSWORD = "forgot_password"
+private const val ROUTE_RESET_PASSWORD = "reset_password"
 
 @Composable
 @Suppress("unused")
-fun VigiliaNavGraph(navController: NavHostController) {
+fun VigiliaNavGraph(
+    navController: NavHostController,
+    isPasswordResetDeepLink: Boolean = false,
+    onPasswordResetHandled: () -> Unit = {},
+) {
     val assessment by MonitoringService.currentAssessment.collectAsState()
     val isMonitoringActive = assessment != null
 
@@ -64,6 +72,14 @@ fun VigiliaNavGraph(navController: NavHostController) {
         if (AuthRepository().isLoggedIn()) Screen.Setup.route else ROUTE_AUTH
     }
 
+    // Navigate to reset password screen when app is opened via deep link
+    LaunchedEffect(isPasswordResetDeepLink) {
+        if (isPasswordResetDeepLink) {
+            navController.navigate(ROUTE_RESET_PASSWORD) { launchSingleTop = true }
+            onPasswordResetHandled()
+        }
+    }
+
     // Navigate back to auth when the user logs out
     LaunchedEffect(authUiState.isLoggedIn) {
         if (!authUiState.isLoggedIn && currentRoute != null && currentRoute != ROUTE_AUTH) {
@@ -75,7 +91,8 @@ fun VigiliaNavGraph(navController: NavHostController) {
 
     Scaffold(
         bottomBar = {
-            if (currentRoute != ROUTE_AUTH) {
+            val authRoutes = setOf(ROUTE_AUTH, ROUTE_FORGOT_PASSWORD, ROUTE_RESET_PASSWORD)
+            if (currentRoute !in authRoutes) {
                 VigiliaBottomBar(navController = navController)
             }
         },
@@ -85,7 +102,8 @@ fun VigiliaNavGraph(navController: NavHostController) {
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            if (isMonitoringActive && currentRoute != ROUTE_AUTH) {
+            val authRoutes = setOf(ROUTE_AUTH, ROUTE_FORGOT_PASSWORD, ROUTE_RESET_PASSWORD)
+            if (isMonitoringActive && currentRoute !in authRoutes) {
                 ActiveMonitoringBanner()
             }
 
@@ -100,6 +118,25 @@ fun VigiliaNavGraph(navController: NavHostController) {
                         onAuthSuccess = {
                             navController.navigate(Screen.Setup.route) {
                                 popUpTo(ROUTE_AUTH) { inclusive = true }
+                            }
+                        },
+                        onForgotPassword = {
+                            navController.navigate(ROUTE_FORGOT_PASSWORD)
+                        },
+                    )
+                }
+                composable(ROUTE_FORGOT_PASSWORD) {
+                    ForgotPasswordScreen(
+                        viewModel = authViewModel,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+                composable(ROUTE_RESET_PASSWORD) {
+                    ResetPasswordScreen(
+                        viewModel = authViewModel,
+                        onResetComplete = {
+                            navController.navigate(ROUTE_AUTH) {
+                                popUpTo(0) { inclusive = true }
                             }
                         },
                     )

@@ -5,6 +5,7 @@ import com.vigilia.app.data.remote.SupabaseClient
 import com.vigilia.app.data.remote.dto.ProfileDto
 import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.providers.builtin.Email
+import io.github.jan.supabase.auth.user.UserAttributes
 import io.github.jan.supabase.postgrest.from
 
 /** Handles Supabase email/password authentication. */
@@ -30,6 +31,19 @@ class AuthRepository {
         SupabaseClient.client.from("profiles").upsert(
             ProfileDto(id = userId, fullname = fullName)
         )
+    }
+
+    /** Sends a password reset email with a deep link back to the app. */
+    suspend fun sendPasswordReset(email: String): Result<Unit> = runCatching {
+        SupabaseClient.client.auth.resetPasswordForEmail(
+            email = email,
+            redirectTo = "vigilia://reset-password",
+        )
+    }
+
+    /** Updates the password of the currently authenticated user. */
+    suspend fun updatePassword(newPassword: String): Result<Unit> = runCatching {
+        SupabaseClient.client.auth.updateUser(UserAttributes(password = newPassword))
     }
 
     /** Signs out the current user. */

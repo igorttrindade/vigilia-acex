@@ -10,7 +10,10 @@ object SupabaseClient {
         supabaseUrl = BuildConfig.SUPABASE_URL,
         supabaseKey = BuildConfig.SUPABASE_KEY,
     ) {
-        install(Auth)
+        install(Auth) {
+            scheme = "vigilia"
+            host = "reset-password"
+        }
         install(Postgrest)
     }
 }
