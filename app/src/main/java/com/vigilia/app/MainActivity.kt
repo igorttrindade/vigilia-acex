@@ -15,11 +15,11 @@ import com.vigilia.app.data.remote.SupabaseClient
 import com.vigilia.app.ui.navigation.VigiliaNavGraph
 import com.vigilia.app.ui.theme.BackgroundDark
 import com.vigilia.app.ui.theme.VigiliaTheme
-import io.github.jan.supabase.handleDeeplinks
+import io.github.jan.supabase.auth.handleDeeplinks
 
 class MainActivity : ComponentActivity() {
 
-    private val isPasswordResetDeepLink = mutableStateOf(false)
+    private val isPasswordResetDeepLink = mutableStateOf(value = false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -36,7 +36,9 @@ class MainActivity : ComponentActivity() {
                     VigiliaNavGraph(
                         navController = navController,
                         isPasswordResetDeepLink = isPasswordResetDeepLink.value,
-                        onPasswordResetHandled = { isPasswordResetDeepLink.value = false },
+                        onPasswordResetHandled = {
+                            isPasswordResetDeepLink.value = false
+                        },
                     )
                 }
             }
@@ -51,7 +53,7 @@ class MainActivity : ComponentActivity() {
 
     private fun processDeepLink(intent: Intent?) {
         val uri = intent?.data ?: return
-        if (uri.scheme == "vigilia" && uri.host == "reset-password") {
+        if ((uri.scheme == "vigilia") && (uri.host == "reset-password")) {
             try {
                 SupabaseClient.client.handleDeeplinks(intent)
             } catch (e: Exception) {
