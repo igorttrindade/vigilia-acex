@@ -160,6 +160,9 @@ class AuthViewModel : ViewModel() {
     fun signOut() {
         viewModelScope.launch {
             authRepository.signOut()
+                .onFailure { e ->
+                    android.util.Log.w("AuthViewModel", "Sign out failed on server", e)
+                }
             _uiState.update { it.copy(isLoggedIn = false) }
         }
     }

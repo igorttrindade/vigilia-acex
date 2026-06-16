@@ -37,6 +37,8 @@ class CameraManager(private val context: Context) {
         onMetricsAvailable: (FatigueMetrics) -> Unit,
         surfaceProvider: Preview.SurfaceProvider? = null,
     ) {
+        if (cameraProvider != null) return
+
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
 
         faceAnalyzer?.close()
@@ -132,6 +134,7 @@ class CameraManager(private val context: Context) {
 
     fun stopCamera() {
         cameraProvider?.unbindAll()
+        cameraProvider = null
         analysisExecutor?.shutdownNow()
         analysisExecutor = null
         faceAnalyzer?.close()

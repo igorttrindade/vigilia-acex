@@ -86,7 +86,7 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
             return createAssessment(0f, metrics.timestampMs, false, 0f, false)
         }
 
-        if (currentState == FatigueState.NO_FACE) {
+        if (currentState == FatigueState.NO_FACE || (calibrationEnabled && calibrationStartMs < 0)) {
             currentState = if (calibrationEnabled && calibrationStartMs < 0) FatigueState.CALIBRATING else FatigueState.NORMAL
         }
 
@@ -115,21 +115,6 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
                     calibrationProgress = progress,
                 )
             }
-        }
-
-        // Start calibration on first face-detected frame
-        if (calibrationEnabled && calibrationStartMs < 0) {
-            calibrationStartMs = currentTime
-            currentState = FatigueState.CALIBRATING
-            return FatigueAssessment(
-                score = 0f,
-                fatigueState = FatigueState.CALIBRATING,
-                blinkRate = 0f,
-                isYawning = false,
-                isFaceDetected = true,
-                timestampMs = currentTime,
-                calibrationProgress = 0f,
-            )
         }
 
         val isEyeClosed = metrics.leftEyeOpenProbability < eyeClosedThreshold ||

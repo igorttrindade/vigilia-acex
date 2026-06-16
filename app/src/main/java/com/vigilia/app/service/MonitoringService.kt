@@ -36,8 +36,6 @@ import com.vigilia.app.domain.model.FatigueState
 import com.vigilia.app.domain.model.TelemetryRecord
 import com.vigilia.app.domain.scoring.FatigueScorer
 import kotlinx.coroutines.*
-import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
@@ -156,7 +154,6 @@ class MonitoringService : Service(), LifecycleOwner {
         if (isProcessRunning) return
 
         scorer = FatigueScorer(calibrationEnabled)
-        isProcessRunning = true
         startForeground(NOTIFICATION_ID, createNotification("Iniciando monitoramento..."))
         startLocationUpdates()
         startSensorUpdates()
@@ -166,7 +163,8 @@ class MonitoringService : Service(), LifecycleOwner {
                 acquireWakeLock()
                 sessionId = telemetryWriter.startSession()
                 lifecycleRegistry.currentState = Lifecycle.State.RESUMED
-                
+                isProcessRunning = true
+
                 cameraManager.startCamera(
                     this@MonitoringService,
                     { metrics ->
@@ -211,7 +209,7 @@ class MonitoringService : Service(), LifecycleOwner {
         updateNotification("Monitorando... Estado: ${assessment.fatigueState}")
 
         val previousAssessment = currentAssessment.value
-        if (assessment.fatigueState != previousAssessment?.fatigueState) {
+        if (previousAssessment != null && assessment.fatigueState != previousAssessment.fatigueState) {
             if (assessment.fatigueState == FatigueState.WARNING || assessment.fatigueState == FatigueState.FATIGUED) {
                 serviceScope.launch { triggerAlert() }
             } else if (assessment.fatigueState == FatigueState.NORMAL || assessment.fatigueState == FatigueState.NO_FACE) {
@@ -387,21 +385,18 @@ class MonitoringService : Service(), LifecycleOwner {
         releaseWakeLock()
         serviceScope.cancel()
 
-        CoroutineScope(Dispatchers.IO).launch {
+        runBlocking {
             try {
-                // stopSession() acquires writeMutex — pending writerScope writes finish first
                 telemetryWriter.stopSession()
             } catch (e: Exception) {
                 Log.e("MonitoringService", "Stop session failed", e)
             }
             writerScope.cancel()
             try {
-                withTimeout(15_000L) {
+                withTimeoutOrNull(15_000L) {
                     SyncRepository(this@MonitoringService).syncPendingSessions()
                 }
                 Log.i("MonitoringService", "Session sync completed")
-            } catch (e: TimeoutCancellationException) {
-                Log.w("MonitoringService", "Session sync timed out, will retry next time")
             } catch (e: Exception) {
                 Log.w("MonitoringService", "Session sync failed, will retry next time", e)
             }
