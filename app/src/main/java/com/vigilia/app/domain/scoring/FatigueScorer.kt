@@ -18,7 +18,8 @@ import java.util.ArrayDeque
 class FatigueScorer(private val calibrationEnabled: Boolean = true) {
 
     private companion object {
-        const val PERCLOS_WINDOW_MS = 20_000L
+        // Shorter window → PERCLOS accumulates faster; eyes closing for 5s fills 50% of window
+        const val PERCLOS_WINDOW_MS = 10_000L
         const val BLINK_WINDOW_MS = 60_000L
         const val YAWN_THRESHOLD_PROB = 0.5f
         const val YAWN_DURATION_MS = 2_000L
@@ -29,7 +30,8 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         const val EYE_CLOSED_THRESHOLD_DEFAULT = 0.3f
         const val EYE_OPEN_THRESHOLD_DEFAULT = 0.4f
 
-        const val SCORE_WEIGHT_PERCLOS = 50f
+        // PERCLOS raised to 65 so fully-closed eyes alone can push score above FATIGUED threshold
+        const val SCORE_WEIGHT_PERCLOS = 65f
         const val SCORE_WEIGHT_BLINK = 20f
         const val SCORE_WEIGHT_YAWN = 25f
 
@@ -40,12 +42,16 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
 
         const val TRANSITION_NORMAL_TO_WARNING_SCORE = 40f
         const val TRANSITION_NORMAL_TO_WARNING_MS = 2_000L
-        const val TRANSITION_WARNING_TO_FATIGUED_SCORE = 70f
+        // Lowered from 70 → 55: PERCLOS=1.0 alone (65 pts) now exceeds this threshold
+        const val TRANSITION_WARNING_TO_FATIGUED_SCORE = 55f
         const val TRANSITION_WARNING_TO_FATIGUED_MS = 4_000L
         const val TRANSITION_WARNING_TO_NORMAL_SCORE = 25f
         const val TRANSITION_WARNING_TO_NORMAL_MS = 10_000L
         const val TRANSITION_FATIGUED_TO_WARNING_SCORE = 50f
         const val TRANSITION_FATIGUED_TO_WARNING_MS = 10_000L
+
+        // Grace period before NO_FACE resets the state machine — absorbs brief detection glitches
+        const val NO_FACE_GRACE_MS = 500L
 
         // Calibration
         const val CALIBRATION_DURATION_MS = 7_000L
@@ -72,6 +78,9 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
     private var transitionStartTime: Long? = null
     private var targetState: FatigueState? = null
 
+    // Tracks how long face has been absent; prevents single-frame glitches from resetting state
+    private var noFaceStartTime: Long? = null
+
     // Calibration state
     private var calibrationStartMs = -1L
     private val calibrationSamples = mutableListOf<Float>()
@@ -80,11 +89,22 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
 
     fun processFrame(metrics: FatigueMetrics): FatigueAssessment {
         if (!metrics.isFaceDetected) {
-            currentState = FatigueState.NO_FACE
-            transitionStartTime = null
-            targetState = null
-            return createAssessment(0f, metrics.timestampMs, false, 0f, false)
+            val now = metrics.timestampMs
+            if (noFaceStartTime == null) noFaceStartTime = now
+            val noFaceDuration = now - noFaceStartTime!!
+
+            return if (noFaceDuration >= NO_FACE_GRACE_MS) {
+                // Sustained absence — transition to NO_FACE and reset state machine
+                currentState = FatigueState.NO_FACE
+                transitionStartTime = null
+                targetState = null
+                createAssessment(0f, now, false, 0f, false)
+            } else {
+                // Brief glitch — hold current state so detection progress isn't lost
+                createAssessment(smoothedScore, now, false, blinkTimestamps.size.toFloat(), isCurrentlyYawning)
+            }
         }
+        noFaceStartTime = null
 
         if (currentState == FatigueState.NO_FACE || (calibrationEnabled && calibrationStartMs < 0)) {
             currentState = if (calibrationEnabled && calibrationStartMs < 0) FatigueState.CALIBRATING else FatigueState.NORMAL
@@ -191,6 +211,7 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         currentState = FatigueState.NORMAL
         transitionStartTime = null
         targetState = null
+        noFaceStartTime = null
         calibrationStartMs = -1L
         calibrationSamples.clear()
         eyeClosedThreshold = EYE_CLOSED_THRESHOLD_DEFAULT

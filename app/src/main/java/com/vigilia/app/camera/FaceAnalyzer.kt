@@ -50,8 +50,8 @@ class FaceAnalyzer(
                     .setRunningMode(RunningMode.IMAGE)
                     .setNumFaces(1)
                     .setOutputFaceBlendshapes(true)
-                    .setMinFaceDetectionConfidence(0.3f)
-                    .setMinFacePresenceConfidence(0.3f)
+                    .setMinFaceDetectionConfidence(0.5f)
+                    .setMinFacePresenceConfidence(0.5f)
                     .build()
                 val lm = FaceLandmarker.createFromOptions(context, options)
                 if (closed) lm.close() else faceLandmarker = lm
@@ -82,19 +82,25 @@ class FaceAnalyzer(
 
             val metrics = if (blendshapesOpt.isPresent && blendshapesOpt.get().isNotEmpty()) {
                 val shapes = blendshapesOpt.get()[0]
-                val eyeBlinkLeft  = shapes.find { it.categoryName() == "eyeBlinkLeft"  }?.score() ?: 0f
-                val eyeBlinkRight = shapes.find { it.categoryName() == "eyeBlinkRight" }?.score() ?: 0f
+                val eyeBlinkLeft  = shapes.find { it.categoryName() == "eyeBlinkLeft"  }?.score()
+                val eyeBlinkRight = shapes.find { it.categoryName() == "eyeBlinkRight" }?.score()
                 val jawOpen       = shapes.find { it.categoryName() == "jawOpen"       }?.score() ?: 0f
 
-                Log.d("FaceAnalyzer", "blinkL=$eyeBlinkLeft blinkR=$eyeBlinkRight jawOpen=$jawOpen")
-
-                FatigueMetrics(
-                    leftEyeOpenProbability  = (1f - eyeBlinkLeft).coerceIn(0f, 1f),
-                    rightEyeOpenProbability = (1f - eyeBlinkRight).coerceIn(0f, 1f),
-                    mouthOpenProbability    = jawOpen,
-                    isFaceDetected          = true,
-                    timestampMs             = System.nanoTime() / 1_000_000,
-                )
+                // If either eye blendshape is absent the model is uncertain — treat as no face
+                // rather than silently defaulting to 0f (which would be read as "eyes wide open")
+                if (eyeBlinkLeft == null || eyeBlinkRight == null) {
+                    Log.w("FaceAnalyzer", "Eye blendshapes missing — discarding frame as NO_FACE")
+                    createNoFaceMetrics()
+                } else {
+                    Log.d("FaceAnalyzer", "blinkL=$eyeBlinkLeft blinkR=$eyeBlinkRight jawOpen=$jawOpen")
+                    FatigueMetrics(
+                        leftEyeOpenProbability  = (1f - eyeBlinkLeft).coerceIn(0f, 1f),
+                        rightEyeOpenProbability = (1f - eyeBlinkRight).coerceIn(0f, 1f),
+                        mouthOpenProbability    = jawOpen,
+                        isFaceDetected          = true,
+                        timestampMs             = System.nanoTime() / 1_000_000,
+                    )
+                }
             } else {
                 createNoFaceMetrics()
             }

@@ -24,6 +24,8 @@ data class AuthUiState(
     // Reset password (after deep link)
     val newPasswordError: String? = null,
     val resetComplete: Boolean = false,
+    // Sign-up requires email confirmation before accessing the app
+    val registrationPendingConfirmation: Boolean = false,
 )
 
 /** Manages email/password authentication state for [AuthScreen]. */
@@ -112,7 +114,13 @@ class AuthViewModel : ViewModel() {
         _uiState.update { it.copy(isLoading = true, errorMessage = null) }
         viewModelScope.launch {
             authRepository.signUp(state.email, state.password, state.fullName)
-                .onSuccess { _uiState.update { it.copy(isLoading = false, isLoggedIn = true) } }
+                .onSuccess {
+                    if (authRepository.isLoggedIn()) {
+                        _uiState.update { it.copy(isLoading = false, isLoggedIn = true) }
+                    } else {
+                        _uiState.update { it.copy(isLoading = false, registrationPendingConfirmation = true) }
+                    }
+                }
                 .onFailure { e ->
                     _uiState.update { it.copy(isLoading = false, errorMessage = mapError(e.message)) }
                 }
@@ -168,6 +176,14 @@ class AuthViewModel : ViewModel() {
     }
 
     fun clearError() {
-        _uiState.update { it.copy(errorMessage = null, nameError = null, emailError = null, passwordError = null) }
+        _uiState.update {
+            it.copy(
+                errorMessage = null,
+                nameError = null,
+                emailError = null,
+                passwordError = null,
+                registrationPendingConfirmation = false,
+            )
+        }
     }
 }

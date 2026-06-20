@@ -2,10 +2,13 @@ package com.vigilia.app.ui.auth
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MarkEmailRead
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -41,6 +44,14 @@ fun AuthScreen(
 
     LaunchedEffect(uiState.isLoggedIn) {
         if (uiState.isLoggedIn) onAuthSuccess()
+    }
+
+    if (uiState.registrationPendingConfirmation) {
+        RegistrationPendingScreen(onBack = {
+            viewModel.clearError()
+            isSignUpMode = false
+        })
+        return
     }
 
     Column(
@@ -201,6 +212,77 @@ fun AuthScreen(
                     fontSize = 14.sp,
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun RegistrationPendingScreen(onBack: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(BackgroundDark)
+            .padding(horizontal = 32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    color = NormalGreen.copy(alpha = 0.12f),
+                    shape = RoundedCornerShape(16.dp),
+                )
+                .border(
+                    width = 1.dp,
+                    color = NormalGreen.copy(alpha = 0.4f),
+                    shape = RoundedCornerShape(16.dp),
+                )
+                .padding(horizontal = 24.dp, vertical = 32.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(64.dp)
+                        .background(NormalGreen.copy(alpha = 0.2f), CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.MarkEmailRead,
+                        contentDescription = null,
+                        tint = NormalGreen,
+                        modifier = Modifier.size(32.dp),
+                    )
+                }
+                Text(
+                    text = "Conta criada!",
+                    color = NormalGreen,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                )
+                Text(
+                    text = "Verifique seu e-mail e clique no link de confirmação para ativar o acesso.",
+                    color = TextSecondary,
+                    fontSize = 14.sp,
+                    textAlign = TextAlign.Center,
+                    lineHeight = 20.sp,
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        TextButton(onClick = onBack) {
+            Text(
+                text = "Voltar para o login",
+                color = TextSecondary,
+                fontSize = 14.sp,
+            )
         }
     }
 }

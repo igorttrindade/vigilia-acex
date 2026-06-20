@@ -94,7 +94,7 @@ private fun EmailSentConfirmation(onBack: () -> Unit) {
             }
 
             Text(
-                text = "E-mail enviado!",
+                text = "Verifique seu e-mail",
                 color = NormalGreen,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Bold,
@@ -102,7 +102,7 @@ private fun EmailSentConfirmation(onBack: () -> Unit) {
             )
 
             Text(
-                text = "Verifique o seu e-mail para fazer a redefinição da sua senha.",
+                text = "Se este endereço estiver cadastrado, você receberá um link para redefinir sua senha em breve.",
                 color = TextSecondary,
                 fontSize = 14.sp,
                 textAlign = TextAlign.Center,

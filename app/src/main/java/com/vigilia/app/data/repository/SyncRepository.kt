@@ -26,13 +26,13 @@ class SyncRepository(private val context: Context) {
      * Skips sessions that have already been synced (`.synced` marker present).
      */
     suspend fun syncSession(summary: SessionSummary): Result<Unit> = runCatching {
-        val userId = authRepository.currentUserId()
-            ?: error("Not logged in")
+        val userId = authRepository.refreshAndGetUserId()
+            ?: error("Not logged in — session expired or user signed out")
         val dto = SessionSummaryDto(
             id = summary.sessionId,
             userId = userId,
-            startTime = Instant.ofEpochMilli(summary.startTime).toString(),
-            endTime = Instant.ofEpochMilli(summary.endTime).toString(),
+            startTime = summary.startTime,
+            endTime = summary.endTime,
             durationMs = summary.durationMs,
             totalAlerts = summary.totalAlerts,
             dominantState = summary.dominantState.name,
@@ -47,8 +47,8 @@ class SyncRepository(private val context: Context) {
      * in batches of 100 to avoid request size limits.
      */
     suspend fun syncTelemetry(sessionId: String): Result<Unit> = runCatching {
-        val userId = authRepository.currentUserId()
-            ?: error("Not logged in")
+        val userId = authRepository.refreshAndGetUserId()
+            ?: error("Not logged in — session expired or user signed out")
         val csvFile = File(File(context.filesDir, "sessions"), "$sessionId/session.csv")
         if (!csvFile.exists()) return@runCatching
 
@@ -59,6 +59,12 @@ class SyncRepository(private val context: Context) {
                 .mapNotNull { parseCsvLine(it, sessionId, userId) }
         }
 
+        if (records.isEmpty()) {
+            Log.w("SyncRepository", "No telemetry records to sync for session $sessionId")
+            return@runCatching
+        }
+
+        Log.i("SyncRepository", "Uploading ${records.size} telemetry records for session $sessionId")
         records.chunked(100).forEach { batch ->
             SupabaseClient.client.from("telemetry_records").upsert(batch)
         }
@@ -84,7 +90,7 @@ class SyncRepository(private val context: Context) {
                 File(folder, ".synced").createNewFile()
                 Log.i("SyncRepository", "Synced session ${summary.sessionId}")
             } catch (e: Exception) {
-                Log.w("SyncRepository", "Failed to sync session ${folder.name}, will retry", e)
+                Log.e("SyncRepository", "Failed to sync session ${folder.name}: ${e.message}", e)
             }
         }
     }
@@ -126,7 +132,10 @@ class SyncRepository(private val context: Context) {
                 gyroY = if (p.size > 16) p[16].toFloatOrNull() else null,
                 gyroZ = if (p.size > 17) p[17].toFloatOrNull() else null,
             )
-        } catch (_: Exception) { null }
+        } catch (e: Exception) {
+            Log.w("SyncRepository", "Failed to parse CSV line: $line", e)
+            null
+        }
     }
 
     private fun parseSummaryJson(folder: File): SessionSummary? {

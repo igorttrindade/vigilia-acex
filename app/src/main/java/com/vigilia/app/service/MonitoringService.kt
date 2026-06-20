@@ -28,7 +28,6 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import com.google.android.gms.location.*
 import com.vigilia.app.camera.CameraManager
-import com.vigilia.app.data.repository.SyncRepository
 import com.vigilia.app.data.telemetry.TelemetryWriter
 import com.vigilia.app.domain.model.FatigueAssessment
 import com.vigilia.app.domain.model.FatigueMetrics
@@ -55,7 +54,7 @@ class MonitoringService : Service(), LifecycleOwner {
         const val EXTRA_CALIBRATION_ENABLED = "extra_calibration_enabled"
         private const val CHANNEL_ID = "vigilia_monitoring"
         private const val NOTIFICATION_ID = 1
-        private const val ALERT_COOLDOWN_MS = 30_000L
+        private const val ALERT_COOLDOWN_MS = 8_000L
 
         val currentAssessment = MutableStateFlow<FatigueAssessment?>(null)
     }
@@ -185,13 +184,14 @@ class MonitoringService : Service(), LifecycleOwner {
 
     private fun stopMonitoring() {
         if (!isProcessRunning) return
-        
+
         isProcessRunning = false
         currentAssessment.value = null
         stopLocationUpdates()
         stopSensorUpdates()
 
         stopForeground(STOP_FOREGROUND_REMOVE)
+        SyncWorker.enqueue(this)
 
         stopSelf()
     }
@@ -208,11 +208,24 @@ class MonitoringService : Service(), LifecycleOwner {
     private fun handleAssessment(assessment: FatigueAssessment, metrics: FatigueMetrics) {
         updateNotification("Monitorando... Estado: ${assessment.fatigueState}")
 
-        val previousAssessment = currentAssessment.value
-        if (previousAssessment != null && assessment.fatigueState != previousAssessment.fatigueState) {
-            if (assessment.fatigueState == FatigueState.WARNING || assessment.fatigueState == FatigueState.FATIGUED) {
+        val previousState = currentAssessment.value?.fatigueState ?: FatigueState.NORMAL
+        val newState = assessment.fatigueState
+
+        when {
+            // Transition into a danger state — alert immediately (handles first-frame case too)
+            (newState == FatigueState.WARNING || newState == FatigueState.FATIGUED) && newState != previousState -> {
                 serviceScope.launch { triggerAlert() }
-            } else if (assessment.fatigueState == FatigueState.NORMAL || assessment.fatigueState == FatigueState.NO_FACE) {
+            }
+            // Sustained FATIGUED — re-alert periodically after cooldown expires
+            newState == FatigueState.FATIGUED -> {
+                val now = System.currentTimeMillis()
+                if (now - lastAlertTimeMs >= ALERT_COOLDOWN_MS) {
+                    serviceScope.launch { triggerAlert() }
+                }
+            }
+            // Returning to safe state — stop any active alert
+            (newState == FatigueState.NORMAL || newState == FatigueState.NO_FACE) &&
+                    (previousState == FatigueState.WARNING || previousState == FatigueState.FATIGUED) -> {
                 serviceScope.launch { stopAlert() }
             }
         }
@@ -386,20 +399,16 @@ class MonitoringService : Service(), LifecycleOwner {
         serviceScope.cancel()
 
         runBlocking {
+            // Drain any telemetry writes still in flight before stopping the session
+            writerScope.coroutineContext[kotlinx.coroutines.Job]
+                ?.children?.toList()?.forEach { runCatching { it.join() } }
+
             try {
                 telemetryWriter.stopSession()
             } catch (e: Exception) {
                 Log.e("MonitoringService", "Stop session failed", e)
             }
             writerScope.cancel()
-            try {
-                withTimeoutOrNull(15_000L) {
-                    SyncRepository(this@MonitoringService).syncPendingSessions()
-                }
-                Log.i("MonitoringService", "Session sync completed")
-            } catch (e: Exception) {
-                Log.w("MonitoringService", "Session sync failed, will retry next time", e)
-            }
         }
 
         super.onDestroy()

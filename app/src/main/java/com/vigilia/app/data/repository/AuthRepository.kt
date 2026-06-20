@@ -56,4 +56,10 @@ class AuthRepository {
 
     /** Returns the current user ID, or null if not logged in. */
     fun currentUserId(): String? = SupabaseClient.client.auth.currentUserOrNull()?.id
+
+    /** Refreshes the Supabase session and returns the user ID, or null if not logged in / refresh fails. */
+    suspend fun refreshAndGetUserId(): String? = runCatching {
+        SupabaseClient.client.auth.refreshCurrentSession()
+        SupabaseClient.client.auth.currentUserOrNull()?.id
+    }.getOrNull()
 }

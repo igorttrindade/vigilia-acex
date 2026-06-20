@@ -8,8 +8,8 @@ import kotlinx.serialization.Serializable
 data class SessionSummaryDto(
     @SerialName("id") val id: String,
     @SerialName("user_id") val userId: String,
-    @SerialName("start_time") val startTime: String,
-    @SerialName("end_time") val endTime: String,
+    @SerialName("start_time") val startTime: Long,
+    @SerialName("end_time") val endTime: Long,
     @SerialName("duration_ms") val durationMs: Long,
     @SerialName("total_alerts") val totalAlerts: Int,
     @SerialName("dominant_state") val dominantState: String,

@@ -49,6 +49,13 @@ android {
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
+    packaging {
+        jniLibs {
+            // MediaPipe native libs must be extracted to the filesystem;
+            // the default compressed-in-APK approach fails on API < 29.
+            useLegacyPackaging = true
+        }
+    }
 }
 
 dependencies {
@@ -85,6 +92,7 @@ dependencies {
     debugImplementation("io.github.jan-tennert.supabase:supabase-kt-android-debug:3.1.4")
     implementation(libs.ktor.android)
     implementation(libs.play.services.location)
+    implementation(libs.androidx.work.runtime.ktx)
 
     testImplementation("org.json:json:20231013")
     testImplementation(libs.junit)

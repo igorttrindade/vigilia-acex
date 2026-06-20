@@ -12,6 +12,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.navigation.compose.rememberNavController
 import com.vigilia.app.data.remote.SupabaseClient
+import com.vigilia.app.data.repository.AuthRepository
+import com.vigilia.app.service.SyncWorker
 import com.vigilia.app.ui.navigation.VigiliaNavGraph
 import com.vigilia.app.ui.theme.BackgroundDark
 import com.vigilia.app.ui.theme.VigiliaTheme
@@ -25,6 +27,9 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         processDeepLink(intent)
+        if (AuthRepository().isLoggedIn()) {
+            SyncWorker.enqueue(this)
+        }
 
         setContent {
             VigiliaTheme {
@@ -56,10 +61,10 @@ class MainActivity : ComponentActivity() {
         if ((uri.scheme == "vigilia") && (uri.host == "reset-password")) {
             try {
                 SupabaseClient.client.handleDeeplinks(intent)
+                isPasswordResetDeepLink.value = true
             } catch (e: Exception) {
                 Log.w("MainActivity", "Deep link processing failed", e)
             }
-            isPasswordResetDeepLink.value = true
         }
     }
 }
