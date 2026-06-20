@@ -14,7 +14,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
-import java.time.Instant
 
 /** Syncs completed local sessions to the Supabase cloud. */
 class SyncRepository(private val context: Context) {
@@ -114,7 +113,7 @@ class SyncRepository(private val context: Context) {
             TelemetryRecordDto(
                 sessionId = sessionId,
                 userId = userId,
-                timestamp = Instant.ofEpochMilli(p[1].toLong()).toString(),
+                timestamp = p[1].toLong(),
                 score = p[2].toFloat(),
                 state = p[3],
                 eyeOpenness = p[4].toFloat(),

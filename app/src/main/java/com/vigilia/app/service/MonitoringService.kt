@@ -191,8 +191,6 @@ class MonitoringService : Service(), LifecycleOwner {
         stopSensorUpdates()
 
         stopForeground(STOP_FOREGROUND_REMOVE)
-        SyncWorker.enqueue(this)
-
         stopSelf()
     }
 
@@ -410,7 +408,7 @@ class MonitoringService : Service(), LifecycleOwner {
             }
             writerScope.cancel()
         }
-
+        SyncWorker.enqueue(this)
         super.onDestroy()
     }
 
