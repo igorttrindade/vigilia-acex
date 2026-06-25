@@ -21,9 +21,11 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         // Shorter window → PERCLOS accumulates faster; eyes closing for 5s fills 50% of window
         const val PERCLOS_WINDOW_MS = 10_000L
         const val BLINK_WINDOW_MS = 60_000L
-        const val YAWN_THRESHOLD_PROB = 0.5f
-        const val YAWN_DURATION_MS = 2_000L
+        const val YAWN_THRESHOLD_PROB = 0.38f
+        const val YAWN_DURATION_MS = 1_500L
         const val YAWN_RESET_MS = 5_000L
+        // Brief mouth-close tolerance: door not reset mid-yawn due to speaking/coughing frame
+        const val YAWN_GRACE_MS = 300L
         const val SMOOTHING_ALPHA = 0.3f
 
         // Generic thresholds — replaced by calibrated values when calibration runs
@@ -69,6 +71,7 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
     private var isBlinking = false
 
     private var yawnStartTime: Long? = null
+    private var yawnGraceStart: Long? = null
     private var lastYawnDetectedTime: Long? = null
     private var isCurrentlyYawning = false
 
@@ -164,6 +167,7 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
 
         // 3. Yawn Detection
         if (metrics.mouthOpenProbability > YAWN_THRESHOLD_PROB) {
+            yawnGraceStart = null
             if (yawnStartTime == null) {
                 yawnStartTime = currentTime
             } else if (currentTime - yawnStartTime!! >= YAWN_DURATION_MS) {
@@ -173,7 +177,15 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
                 }
             }
         } else {
-            yawnStartTime = null
+            // Grace period: tolerate brief mouth closures (cough, speech) without resetting the timer
+            if (yawnStartTime != null) {
+                if (yawnGraceStart == null) {
+                    yawnGraceStart = currentTime
+                } else if (currentTime - yawnGraceStart!! > YAWN_GRACE_MS) {
+                    yawnStartTime = null
+                    yawnGraceStart = null
+                }
+            }
         }
 
         if (isCurrentlyYawning && lastYawnDetectedTime != null && currentTime - lastYawnDetectedTime!! > YAWN_RESET_MS) {
@@ -205,6 +217,7 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         lastEyeOpenness = 1.0f
         isBlinking = false
         yawnStartTime = null
+        yawnGraceStart = null
         lastYawnDetectedTime = null
         isCurrentlyYawning = false
         smoothedScore = 0f

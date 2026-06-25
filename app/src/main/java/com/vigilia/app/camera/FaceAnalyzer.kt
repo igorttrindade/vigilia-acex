@@ -10,8 +10,10 @@ import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.ImageProcessingOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
 import com.vigilia.app.domain.model.FatigueMetrics
+import kotlin.math.abs
 
 /**
  * Extracts face metrics from camera frames using MediaPipe FaceLandmarker.
@@ -80,6 +82,8 @@ class FaceAnalyzer(
             val result = landmarker.detect(mpImage, imageOptions)
             val blendshapesOpt = result.faceBlendshapes()
 
+            val landmarksList = result.faceLandmarks()
+
             val metrics = if (blendshapesOpt.isPresent && blendshapesOpt.get().isNotEmpty()) {
                 val shapes = blendshapesOpt.get()[0]
                 val eyeBlinkLeft  = shapes.find { it.categoryName() == "eyeBlinkLeft"  }?.score()
@@ -92,10 +96,23 @@ class FaceAnalyzer(
                     Log.w("FaceAnalyzer", "Eye blendshapes missing — discarding frame as NO_FACE")
                     createNoFaceMetrics()
                 } else {
-                    Log.d("FaceAnalyzer", "blinkL=$eyeBlinkLeft blinkR=$eyeBlinkRight jawOpen=$jawOpen")
+                    val blendLeft  = (1f - eyeBlinkLeft).coerceIn(0f, 1f)
+                    val blendRight = (1f - eyeBlinkRight).coerceIn(0f, 1f)
+
+                    // EAR (Eye Aspect Ratio) uses geometric eyelid distances — immune to lens
+                    // reflections that inflate blendshape-based openness for glasses wearers.
+                    // We take the minimum of blendshape and EAR so reflections never hide a blink.
+                    val (earLeft, earRight) = if (landmarksList.isNotEmpty()) {
+                        calculateEarOpenness(landmarksList[0])
+                    } else Pair(blendLeft, blendRight)
+
+                    val finalLeft  = minOf(blendLeft, earLeft)
+                    val finalRight = minOf(blendRight, earRight)
+
+                    Log.d("FaceAnalyzer", "blinkL=$eyeBlinkLeft blinkR=$eyeBlinkRight jawOpen=$jawOpen earL=$earLeft earR=$earRight")
                     FatigueMetrics(
-                        leftEyeOpenProbability  = (1f - eyeBlinkLeft).coerceIn(0f, 1f),
-                        rightEyeOpenProbability = (1f - eyeBlinkRight).coerceIn(0f, 1f),
+                        leftEyeOpenProbability  = finalLeft,
+                        rightEyeOpenProbability = finalRight,
                         mouthOpenProbability    = jawOpen,
                         isFaceDetected          = true,
                         timestampMs             = System.nanoTime() / 1_000_000,
@@ -130,7 +147,39 @@ class FaceAnalyzer(
         timestampMs             = System.nanoTime() / 1_000_000,
     )
 
+    /**
+     * Computes eye openness [0,1] for both eyes using Eye Aspect Ratio (EAR).
+     *
+     * EAR = vertical_eyelid_gap / horizontal_eye_width. Unlike blendshapes it is
+     * purely geometric, so lens reflections from glasses do not corrupt the result.
+     *
+     * Landmark indices (MediaPipe 478-point mesh):
+     *   Left  — outer:33  inner:133  upper:159  lower:145
+     *   Right — outer:263 inner:362  upper:386  lower:374
+     */
+    private fun calculateEarOpenness(landmarks: List<NormalizedLandmark>): Pair<Float, Float> {
+        if (landmarks.size < 478) return Pair(1f, 1f)
+
+        fun ear(outerIdx: Int, innerIdx: Int, upperIdx: Int, lowerIdx: Int): Float {
+            val vertical   = abs(landmarks[upperIdx].y() - landmarks[lowerIdx].y())
+            val horizontal = abs(landmarks[outerIdx].x() - landmarks[innerIdx].x())
+            return if (horizontal < 0.001f) 0f else vertical / horizontal
+        }
+
+        val leftEar  = ear(33, 133, 159, 145)
+        val rightEar = ear(263, 362, 386, 374)
+
+        return Pair(
+            (leftEar  / EAR_OPEN_REFERENCE).coerceIn(0f, 1f),
+            (rightEar / EAR_OPEN_REFERENCE).coerceIn(0f, 1f),
+        )
+    }
+
     companion object {
         private const val MODEL_ASSET_PATH = "face_landmarker.task"
+
+        // EAR for a fully-open eye in normalized landmark coordinates.
+        // Used to map raw EAR → [0,1] openness probability.
+        private const val EAR_OPEN_REFERENCE = 0.28f
     }
 }

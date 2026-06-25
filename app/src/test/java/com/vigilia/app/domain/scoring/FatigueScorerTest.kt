@@ -31,8 +31,9 @@ class FatigueScorerTest {
 
     @Test
     fun `processFrame with no face detected returns NO_FACE state`() {
-        val metrics = FatigueMetrics(0.8f, 0.8f, 0.1f, false, 1000L)
-        val assessment = scorer.processFrame(metrics)
+        // First frame starts the grace timer; second frame at 600ms exceeds the 500ms grace period.
+        scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, false, 1000L))
+        val assessment = scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, false, 1600L))
         assertEquals(FatigueState.NO_FACE, assessment.fatigueState)
         assertEquals(0f, assessment.score, 0.01f)
     }
@@ -116,15 +117,21 @@ class FatigueScorerTest {
         var currentTime = advanceToWarning(1000L)
 
         // Register blinks so blinkTimestamps is non-empty and blink contribution is active.
-        // After the all-closed WARNING phase isBlinking=true, so the first open frame
-        // immediately counts as a blink completion.
         repeat(3) {
             scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, true, currentTime)); currentTime += 100
             scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, currentTime)); currentTime += 100
         }
 
-        // Closed eyes + yawn: PERCLOS(50) + blink_low(20) + yawn(25) = 95 → score > 70
-        while (scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.8f, true, currentTime)).score <= 70f) {
+        // Drain score below the WARNING→FATIGUED threshold (55) so the scorer's internal
+        // transition timer is guaranteed to be reset before we start the assertion phase.
+        // This ensures startTransitionTime aligns with the scorer's transitionStartTime.
+        while (scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, true, currentTime)).score >= 55f) {
+            currentTime += 100
+        }
+
+        // Now push score above 55 with closed eyes + yawn. The very first frame that
+        // exceeds 55 is when the scorer sets transitionStartTime = currentTime.
+        while (scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.8f, true, currentTime)).score <= 55f) {
             currentTime += 100
         }
 
