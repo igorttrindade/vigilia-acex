@@ -186,6 +186,7 @@ class MonitoringService : Service(), LifecycleOwner {
         if (!isProcessRunning) return
 
         isProcessRunning = false
+        stopAlert()  // stop ringtone immediately rather than waiting for onDestroy
         currentAssessment.value = null
         stopLocationUpdates()
         stopSensorUpdates()
@@ -210,14 +211,18 @@ class MonitoringService : Service(), LifecycleOwner {
         val newState = assessment.fatigueState
 
         when {
-            // Transition into a danger state — alert immediately (handles first-frame case too)
+            // Transition into a danger state — alert immediately (handles first-frame case too).
+            // Update lastAlertTimeMs synchronously so rapid consecutive frames don't queue duplicates.
             (newState == FatigueState.WARNING || newState == FatigueState.FATIGUED) && newState != previousState -> {
+                lastAlertTimeMs = System.currentTimeMillis()
                 serviceScope.launch { triggerAlert() }
             }
-            // Sustained FATIGUED — re-alert periodically after cooldown expires
+            // Sustained FATIGUED — re-alert periodically after cooldown expires.
+            // Cooldown is claimed synchronously to prevent multiple queued launches.
             newState == FatigueState.FATIGUED -> {
                 val now = System.currentTimeMillis()
                 if (now - lastAlertTimeMs >= ALERT_COOLDOWN_MS) {
+                    lastAlertTimeMs = now
                     serviceScope.launch { triggerAlert() }
                 }
             }
@@ -261,9 +266,6 @@ class MonitoringService : Service(), LifecycleOwner {
     }
 
     private fun triggerAlert() {
-        val now = System.currentTimeMillis()
-        if (now - lastAlertTimeMs < ALERT_COOLDOWN_MS) return
-        lastAlertTimeMs = now
         stopAlert()
         try {
             val alertUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)

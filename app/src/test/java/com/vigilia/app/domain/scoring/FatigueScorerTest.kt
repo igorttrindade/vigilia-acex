@@ -57,14 +57,14 @@ class FatigueScorerTest {
     fun `Blink detection correctly counts blinks`() {
         var currentTime = 1000L
 
-        // Simulate 2 blinks
+        // Each blink needs BLINK_MIN_CLOSED_FRAMES (3) consecutive closed frames to be counted
         repeat(2) {
-            scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, true, currentTime))
-            currentTime += 100
-            scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, currentTime)) // Closed
-            currentTime += 100
-            scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, true, currentTime)) // Open again
-            currentTime += 100
+            scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, true, currentTime)); currentTime += 100
+            // 3 closed frames to satisfy debounce
+            repeat(3) {
+                scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, currentTime)); currentTime += 100
+            }
+            scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, true, currentTime)); currentTime += 100 // Open again
         }
 
         val finalAssessment = scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, true, currentTime))

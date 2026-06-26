@@ -58,17 +58,26 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         // Calibration
         const val CALIBRATION_DURATION_MS = 7_000L
         const val CALIBRATION_MIN_SAMPLES = 20
-        const val EYE_CLOSED_RATIO = 0.40f   // closed = baseline * this
+        const val EYE_CLOSED_RATIO = 0.60f   // closed = baseline * this
         const val EYE_CLOSED_MIN = 0.15f
-        const val EYE_CLOSED_MAX = 0.45f
+        const val EYE_CLOSED_MAX = 0.60f
+
+        // Blink debounce: require this many consecutive frames below threshold before confirming closure
+        const val BLINK_MIN_CLOSED_FRAMES = 3
+        // Blink max: sustained closure beyond this is PERCLOS territory, not a blink
+        const val BLINK_MAX_DURATION_MS = 500L
+        // Warmup: don't penalize low blink rate until enough data has been collected
+        const val BLINK_MIN_OBSERVATION_MS = 30_000L
     }
 
     private data class FrameRecord(val timestampMs: Long, val isEyeClosed: Boolean)
     private val perclosWindow = ArrayDeque<FrameRecord>()
     private val blinkTimestamps = ArrayDeque<Long>()
 
-    private var lastEyeOpenness = 1.0f
     private var isBlinking = false
+    private var closedFrameCount = 0
+    private var blinkStartTime: Long? = null
+    private var monitoringStartMs = -1L
 
     private var yawnStartTime: Long? = null
     private var yawnGraceStart: Long? = null
@@ -141,8 +150,7 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         }
 
         val isEyeClosed = metrics.leftEyeOpenProbability < eyeClosedThreshold ||
-                metrics.rightEyeOpenProbability < eyeClosedThreshold ||
-                eyeOpenness < eyeClosedThreshold
+                metrics.rightEyeOpenProbability < eyeClosedThreshold
 
         // 1. PERCLOS Calculation
         perclosWindow.addLast(FrameRecord(currentTime, isEyeClosed))
@@ -153,12 +161,34 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
             perclosWindow.count { it.isEyeClosed }.toFloat() / perclosWindow.size
         }
 
-        // 2. Blink Detection
-        if (!isBlinking && eyeOpenness < eyeClosedThreshold) {
-            isBlinking = true
-        } else if (isBlinking && eyeOpenness > eyeOpenThreshold) {
+        if (monitoringStartMs < 0) monitoringStartMs = currentTime
+
+        // 2. Blink Detection — uses min(left,right) to match PERCLOS OR logic and handle
+        // asymmetric readings (e.g. one eye inflated by glasses reflection).
+        // Temporal debounce: requires BLINK_MIN_CLOSED_FRAMES consecutive frames below threshold.
+        // Max duration: closure > BLINK_MAX_DURATION_MS is sustained (PERCLOS), not a blink.
+        val eyeMin = minOf(metrics.leftEyeOpenProbability, metrics.rightEyeOpenProbability)
+        if (!isBlinking) {
+            if (eyeMin < eyeClosedThreshold) {
+                closedFrameCount++
+                if (closedFrameCount >= BLINK_MIN_CLOSED_FRAMES) {
+                    isBlinking = true
+                    blinkStartTime = currentTime
+                    closedFrameCount = 0
+                }
+            } else {
+                closedFrameCount = 0
+            }
+        } else if (blinkStartTime != null && currentTime - blinkStartTime!! > BLINK_MAX_DURATION_MS) {
+            // Sustained closure — PERCLOS territory, discard as blink
+            isBlinking = false
+            blinkStartTime = null
+            closedFrameCount = 0
+        } else if (eyeMin > eyeOpenThreshold) {
             blinkTimestamps.addLast(currentTime)
             isBlinking = false
+            blinkStartTime = null
+            closedFrameCount = 0
         }
         while (blinkTimestamps.isNotEmpty() && currentTime - blinkTimestamps.first() > BLINK_WINDOW_MS) {
             blinkTimestamps.removeFirst()
@@ -194,10 +224,14 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
 
         // 4. Score Calculation
         val perclosContribution = perclos * SCORE_WEIGHT_PERCLOS
-        // Suppress blink penalty while no blinks have been detected yet — avoids false
-        // fatigue signals in the first frames when the 60-second window is still empty.
-        val blinkContribution = if (blinkTimestamps.isEmpty()) 0f
-            else calculateBlinkDeviationScore(blinkRate) * SCORE_WEIGHT_BLINK
+        // Suppress blink penalty during warmup: with few blinks recorded, the rate looks
+        // abnormally low (e.g. 1 blink → rate=1 → max penalty). Only score after 30 s of data.
+        val elapsedMonitoringMs = currentTime - monitoringStartMs
+        val blinkContribution = when {
+            blinkTimestamps.isEmpty() -> 0f
+            elapsedMonitoringMs < BLINK_MIN_OBSERVATION_MS -> 0f
+            else -> calculateBlinkDeviationScore(blinkRate) * SCORE_WEIGHT_BLINK
+        }
         val yawnContribution = if (isCurrentlyYawning) SCORE_WEIGHT_YAWN else 0f
 
         val rawScore = perclosContribution + blinkContribution + yawnContribution
@@ -214,7 +248,6 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
     fun reset() {
         perclosWindow.clear()
         blinkTimestamps.clear()
-        lastEyeOpenness = 1.0f
         isBlinking = false
         yawnStartTime = null
         yawnGraceStart = null
@@ -229,6 +262,9 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         calibrationSamples.clear()
         eyeClosedThreshold = EYE_CLOSED_THRESHOLD_DEFAULT
         eyeOpenThreshold = EYE_OPEN_THRESHOLD_DEFAULT
+        closedFrameCount = 0
+        blinkStartTime = null
+        monitoringStartMs = -1L
     }
 
     private fun finishCalibration() {
@@ -240,7 +276,10 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         val p90Index = ((sorted.size - 1) * 0.90f).toInt()
         val baseline = sorted[p90Index]
         eyeClosedThreshold = (baseline * EYE_CLOSED_RATIO).coerceIn(EYE_CLOSED_MIN, EYE_CLOSED_MAX)
-        eyeOpenThreshold = (eyeClosedThreshold + 0.10f).coerceIn(eyeClosedThreshold + 0.05f, 0.55f)
+        eyeOpenThreshold = (eyeClosedThreshold + 0.10f).coerceIn(
+            eyeClosedThreshold + 0.05f,
+            (eyeClosedThreshold + 0.20f).coerceAtMost(0.90f),
+        )
         Log.d("FatigueScorer", "Calibration done: baseline=$baseline closed=$eyeClosedThreshold open=$eyeOpenThreshold samples=${calibrationSamples.size}")
     }
 
