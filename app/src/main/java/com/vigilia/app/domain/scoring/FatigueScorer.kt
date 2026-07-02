@@ -18,8 +18,8 @@ import java.util.ArrayDeque
 class FatigueScorer(private val calibrationEnabled: Boolean = true) {
 
     private companion object {
-        // Shorter window → PERCLOS accumulates faster; eyes closing for 5s fills 50% of window
-        const val PERCLOS_WINDOW_MS = 10_000L
+        // Shorter window → PERCLOS accumulates faster; eyes closing for 5s fills ~83% of window
+        const val PERCLOS_WINDOW_MS = 6_000L
         const val BLINK_WINDOW_MS = 60_000L
         const val YAWN_THRESHOLD_PROB = 0.38f
         const val YAWN_DURATION_MS = 1_500L
@@ -48,9 +48,14 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         const val TRANSITION_WARNING_TO_FATIGUED_SCORE = 55f
         const val TRANSITION_WARNING_TO_FATIGUED_MS = 4_000L
         const val TRANSITION_WARNING_TO_NORMAL_SCORE = 25f
-        const val TRANSITION_WARNING_TO_NORMAL_MS = 10_000L
+        const val TRANSITION_WARNING_TO_NORMAL_MS = 5_000L
         const val TRANSITION_FATIGUED_TO_WARNING_SCORE = 50f
-        const val TRANSITION_FATIGUED_TO_WARNING_MS = 10_000L
+        const val TRANSITION_FATIGUED_TO_WARNING_MS = 5_000L
+
+        // Cap on per-frame delta added to the transition accumulator. Prevents brief
+        // excursions into the neutral score band from resetting recovery progress
+        // while still preventing huge jumps after prolonged neutral gaps.
+        const val TRANSITION_MAX_FRAME_DELTA_MS = 200L
 
         // Grace period before NO_FACE resets the state machine — absorbs brief detection glitches
         const val NO_FACE_GRACE_MS = 500L
@@ -87,8 +92,9 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
     private var smoothedScore = 0f
     private var currentState = FatigueState.NORMAL
 
-    private var transitionStartTime: Long? = null
     private var targetState: FatigueState? = null
+    private var transitionAccumulatedMs = 0L
+    private var transitionLastCheckMs = 0L
 
     // Tracks how long face has been absent; prevents single-frame glitches from resetting state
     private var noFaceStartTime: Long? = null
@@ -106,10 +112,15 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
             val noFaceDuration = now - noFaceStartTime!!
 
             return if (noFaceDuration >= NO_FACE_GRACE_MS) {
-                // Sustained absence — transition to NO_FACE and reset state machine
+                // Sustained absence — transition to NO_FACE and drop stale detection buffers so
+                // score doesn't jump back to WARNING/FATIGUED from old data when face returns.
                 currentState = FatigueState.NO_FACE
-                transitionStartTime = null
                 targetState = null
+                transitionAccumulatedMs = 0L
+                transitionLastCheckMs = 0L
+                perclosWindow.clear()
+                blinkTimestamps.clear()
+                smoothedScore = 0f
                 createAssessment(0f, now, false, 0f, false)
             } else {
                 // Brief glitch — hold current state so detection progress isn't lost
@@ -255,8 +266,9 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         isCurrentlyYawning = false
         smoothedScore = 0f
         currentState = FatigueState.NORMAL
-        transitionStartTime = null
         targetState = null
+        transitionAccumulatedMs = 0L
+        transitionLastCheckMs = 0L
         noFaceStartTime = null
         calibrationStartMs = -1L
         calibrationSamples.clear()
@@ -321,19 +333,24 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
 
         if (newTargetState != null) {
             if (targetState != newTargetState) {
+                // Direction changed — start accumulation fresh
                 targetState = newTargetState
-                transitionStartTime = currentTime
+                transitionAccumulatedMs = 0L
             } else {
-                if (currentTime - (transitionStartTime ?: currentTime) >= requiredDuration) {
-                    currentState = newTargetState
-                    targetState = null
-                    transitionStartTime = null
-                }
+                // Same target — accumulate time in target zone. Cap per-frame delta so a
+                // brief excursion into the neutral band doesn't count toward the transition,
+                // but the accumulator keeps its prior progress instead of resetting.
+                val delta = (currentTime - transitionLastCheckMs).coerceAtMost(TRANSITION_MAX_FRAME_DELTA_MS)
+                transitionAccumulatedMs += delta
             }
-        } else {
-            targetState = null
-            transitionStartTime = null
+            transitionLastCheckMs = currentTime
+            if (transitionAccumulatedMs >= requiredDuration) {
+                currentState = newTargetState
+                targetState = null
+                transitionAccumulatedMs = 0L
+            }
         }
+        // Neutral zone: preserve targetState + accumulator; timer pauses (does not reset).
     }
 
     private fun createAssessment(

@@ -122,10 +122,11 @@ class FatigueScorerTest {
             scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, currentTime)); currentTime += 100
         }
 
-        // Drain score below the WARNING→FATIGUED threshold (55) so the scorer's internal
-        // transition timer is guaranteed to be reset before we start the assertion phase.
-        // This ensures startTransitionTime aligns with the scorer's transitionStartTime.
-        while (scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, true, currentTime)).score >= 55f) {
+        // Drain score below the WARNING→NORMAL threshold (25) so the target switches to
+        // NORMAL — that direction change resets the transition accumulator. When push
+        // raises score back above 55, direction flips to FATIGUED and accumulation starts
+        // fresh at 0, aligning with startTransitionTime.
+        while (scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, true, currentTime)).score >= 25f) {
             currentTime += 100
         }
 
@@ -164,14 +165,14 @@ class FatigueScorerTest {
 
         val startTransitionTime = currentTime
 
-        // Sustained for 9.9s — must still be WARNING
-        while (currentTime - startTransitionTime < 9900L) {
+        // Sustained for 4.9s — must still be WARNING
+        while (currentTime - startTransitionTime < 4900L) {
             assertEquals(FatigueState.WARNING, scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, true, currentTime)).fatigueState)
             currentTime += 100
         }
 
-        // At 10s threshold → NORMAL
-        currentTime = startTransitionTime + 10000L
+        // At 5s threshold → NORMAL
+        currentTime = startTransitionTime + 5000L
         assertEquals(FatigueState.NORMAL, scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, true, currentTime)).fatigueState)
     }
 
