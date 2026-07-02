@@ -160,6 +160,7 @@ class MonitoringService : Service(), LifecycleOwner {
         serviceScope.launch {
             try {
                 acquireWakeLock()
+                preloadRingtone()
                 sessionId = telemetryWriter.startSession()
                 lifecycleRegistry.currentState = Lifecycle.State.RESUMED
                 isProcessRunning = true
@@ -215,7 +216,7 @@ class MonitoringService : Service(), LifecycleOwner {
             // Update lastAlertTimeMs synchronously so rapid consecutive frames don't queue duplicates.
             (newState == FatigueState.WARNING || newState == FatigueState.FATIGUED) && newState != previousState -> {
                 lastAlertTimeMs = System.currentTimeMillis()
-                serviceScope.launch { triggerAlert() }
+                triggerAlert()
             }
             // Sustained FATIGUED — re-alert periodically after cooldown expires.
             // Cooldown is claimed synchronously to prevent multiple queued launches.
@@ -223,7 +224,7 @@ class MonitoringService : Service(), LifecycleOwner {
                 val now = System.currentTimeMillis()
                 if (now - lastAlertTimeMs >= ALERT_COOLDOWN_MS) {
                     lastAlertTimeMs = now
-                    serviceScope.launch { triggerAlert() }
+                    triggerAlert()
                 }
             }
             // Returning to safe state — stop any active alert
@@ -266,7 +267,29 @@ class MonitoringService : Service(), LifecycleOwner {
     }
 
     private fun triggerAlert() {
-        stopAlert()
+        val current = ringtone ?: run {
+            preloadRingtone()
+            ringtone ?: return
+        }
+        try {
+            alertJob?.cancel()
+            if (current.isPlaying) current.stop()
+            current.play()
+            alertJob = serviceScope.launch {
+                delay(3000L)
+                try { current.stop() } catch (_: Exception) {}
+            }
+        } catch (e: Exception) { Log.e("MonitoringService", "Alert failed", e) }
+    }
+
+    private fun stopAlert() {
+        try { ringtone?.stop() } catch (_: Exception) {}
+        alertJob?.cancel()
+        alertJob = null
+    }
+
+    private fun preloadRingtone() {
+        if (ringtone != null) return
         try {
             val alertUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
             ringtone = RingtoneManager.getRingtone(this, alertUri).apply {
@@ -276,20 +299,10 @@ class MonitoringService : Service(), LifecycleOwner {
                         .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                         .build()
                 }
-                play()
             }
-            alertJob = serviceScope.launch {
-                delay(3000L)
-                stopAlert()
-            }
-        } catch (e: Exception) { Log.e("MonitoringService", "Alert failed", e) }
-    }
-
-    private fun stopAlert() {
-        ringtone?.stop()
-        ringtone = null
-        alertJob?.cancel()
-        alertJob = null
+        } catch (e: Exception) {
+            Log.e("MonitoringService", "Ringtone preload failed", e)
+        }
     }
 
     private fun startSensorUpdates() {
@@ -394,6 +407,7 @@ class MonitoringService : Service(), LifecycleOwner {
         sessionId = null
         cameraManager.stopCamera()
         stopAlert()
+        ringtone = null
         releaseWakeLock()
         serviceScope.cancel()
 
