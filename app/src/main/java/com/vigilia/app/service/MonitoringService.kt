@@ -391,7 +391,6 @@ class MonitoringService : Service(), LifecycleOwner {
     override fun onDestroy() {
         isProcessRunning = false
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
-        currentAssessment.value = null
         sessionId = null
         cameraManager.stopCamera()
         stopAlert()
