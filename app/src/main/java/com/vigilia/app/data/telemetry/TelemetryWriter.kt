@@ -1,6 +1,7 @@
 package com.vigilia.app.data.telemetry
 
 import android.content.Context
+import android.util.Log
 import com.vigilia.app.domain.model.FatigueState
 import com.vigilia.app.domain.model.SessionSummary
 import com.vigilia.app.domain.model.TelemetryRecord
@@ -58,6 +59,18 @@ class TelemetryWriter private constructor(
      * @return The unique sessionId.
      */
     suspend fun startSession(): String = withContext(Dispatchers.IO) {
+        // Guard-rail: previous session was not finalized (missed stopSession, crash, or a
+        // service instance being reused across sessions). Write its summary now so the
+        // orphan folder still shows up in history instead of being silently discarded.
+        if (currentSessionId != null) {
+            Log.w("TelemetryWriter", "Previous session $currentSessionId was not stopped; finalizing it before starting a new one")
+            try {
+                stopSession()
+            } catch (e: Exception) {
+                Log.e("TelemetryWriter", "Failed to finalize previous session", e)
+            }
+        }
+
         val sessionId = UUID.randomUUID().toString()
         val folder = File(baseDir, sessionId)
         if (!folder.exists()) {

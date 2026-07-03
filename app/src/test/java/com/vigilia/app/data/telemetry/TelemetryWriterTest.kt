@@ -25,6 +25,77 @@ class TelemetryWriterTest {
     }
 
     @Test
+    fun `two consecutive sessions both persist session_summary json`() = runBlocking {
+        val id1 = telemetryWriter.startSession()
+        telemetryWriter.writeRecord(
+            TelemetryRecord(
+                sessionId = id1,
+                timestamp = 1000L,
+                score = 30.0f,
+                state = com.vigilia.app.domain.model.FatigueState.NORMAL,
+                eyeOpenness = 0.8f,
+                blinkRate = 15.0f,
+                isYawning = false,
+                isFaceDetected = true,
+                alertActive = false,
+            )
+        )
+        telemetryWriter.stopSession()
+
+        val id2 = telemetryWriter.startSession()
+        assertTrue("Second session must have a distinct id", id2 != id1)
+        telemetryWriter.writeRecord(
+            TelemetryRecord(
+                sessionId = id2,
+                timestamp = 2000L,
+                score = 70.0f,
+                state = com.vigilia.app.domain.model.FatigueState.FATIGUED,
+                eyeOpenness = 0.2f,
+                blinkRate = 6.0f,
+                isYawning = true,
+                isFaceDetected = true,
+                alertActive = true,
+            )
+        )
+        telemetryWriter.stopSession()
+
+        val summary1 = File(File(testBaseDir, id1), "session_summary.json")
+        val summary2 = File(File(testBaseDir, id2), "session_summary.json")
+        assertTrue("Session 1 summary must exist", summary1.exists())
+        assertTrue("Session 2 summary must exist", summary2.exists())
+        assertTrue("Session 1 JSON references its own id", summary1.readText().contains(id1))
+        assertTrue("Session 2 JSON references its own id", summary2.readText().contains(id2))
+    }
+
+    @Test
+    fun `startSession finalizes an unfinished previous session`() = runBlocking {
+        val id1 = telemetryWriter.startSession()
+        telemetryWriter.writeRecord(
+            TelemetryRecord(
+                sessionId = id1,
+                timestamp = 500L,
+                score = 20.0f,
+                state = com.vigilia.app.domain.model.FatigueState.NORMAL,
+                eyeOpenness = 0.9f,
+                blinkRate = 14.0f,
+                isYawning = false,
+                isFaceDetected = true,
+                alertActive = false,
+            )
+        )
+        // No stopSession() — simulate the bind-keeps-service-alive path
+
+        val id2 = telemetryWriter.startSession()
+        telemetryWriter.stopSession()
+
+        val summary1 = File(File(testBaseDir, id1), "session_summary.json")
+        val summary2 = File(File(testBaseDir, id2), "session_summary.json")
+        assertTrue("Guard-rail must write summary for orphan session 1", summary1.exists())
+        assertTrue("Session 2 summary must exist", summary2.exists())
+        assertTrue("Session 1 JSON must reference session 1 id", summary1.readText().contains(id1))
+    }
+
+    @Test
     fun `session creation and record writing works`() = runBlocking {
         val sessionId = telemetryWriter.startSession()
         assertTrue("SessionId should not be empty", sessionId.isNotEmpty())

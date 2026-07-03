@@ -192,6 +192,21 @@ class MonitoringService : Service(), LifecycleOwner {
         stopLocationUpdates()
         stopSensorUpdates()
 
+        // Finalize the session summary NOW. The bound MonitoringScreen keeps this instance
+        // alive across consecutive start→stop→start cycles, so onDestroy would not fire
+        // between them — the previous session would be overwritten in memory and lose its
+        // session_summary.json (making it invisible in history).
+        runBlocking {
+            writerScope.coroutineContext[kotlinx.coroutines.Job]
+                ?.children?.toList()?.forEach { runCatching { it.join() } }
+            try {
+                telemetryWriter.stopSession()
+            } catch (e: Exception) {
+                Log.e("MonitoringService", "Stop session failed", e)
+            }
+        }
+        sessionId = null
+
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -411,18 +426,12 @@ class MonitoringService : Service(), LifecycleOwner {
         releaseWakeLock()
         serviceScope.cancel()
 
-        runBlocking {
-            // Drain any telemetry writes still in flight before stopping the session
-            writerScope.coroutineContext[kotlinx.coroutines.Job]
-                ?.children?.toList()?.forEach { runCatching { it.join() } }
+        // stopMonitoring() already finalized the session summary and joined the writer jobs.
+        // If the service is being destroyed without a preceding stopMonitoring (e.g. system
+        // kill), TelemetryWriter.startSession's guard-rail will finalize the orphan on the
+        // next run. Cancel the writer scope so no leftover work outlives the service.
+        writerScope.cancel()
 
-            try {
-                telemetryWriter.stopSession()
-            } catch (e: Exception) {
-                Log.e("MonitoringService", "Stop session failed", e)
-            }
-            writerScope.cancel()
-        }
         SyncWorker.enqueue(this)
         super.onDestroy()
     }
