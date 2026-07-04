@@ -66,6 +66,12 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         const val EYE_CLOSED_RATIO = 0.60f   // closed = baseline * this
         const val EYE_CLOSED_MIN = 0.15f
         const val EYE_CLOSED_MAX = 0.60f
+        // Require a consecutive run of well-framed, eyes-open frames before calibration
+        // starts collecting samples. Guards against sampling the user immediately after
+        // they tap Start (dedo saindo do botão, cabeça inclinada), which would drag the
+        // baseline down and produce an inflated eyeClosedThreshold.
+        const val CALIBRATION_STABILIZATION_MS = 1_500L
+        const val CALIBRATION_STABILIZATION_MIN_OPENNESS = 0.5f
 
         // Blink debounce: require this many consecutive frames below threshold before confirming closure
         const val BLINK_MIN_CLOSED_FRAMES = 3
@@ -101,6 +107,7 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
 
     // Calibration state
     private var calibrationStartMs = -1L
+    private var calibrationEligibleSinceMs = -1L
     private val calibrationSamples = mutableListOf<Float>()
     private var eyeClosedThreshold = EYE_CLOSED_THRESHOLD_DEFAULT
     private var eyeOpenThreshold = EYE_OPEN_THRESHOLD_DEFAULT
@@ -121,6 +128,7 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
                 perclosWindow.clear()
                 blinkTimestamps.clear()
                 smoothedScore = 0f
+                calibrationEligibleSinceMs = -1L
                 createAssessment(0f, now, false, 0f, false)
             } else {
                 // Brief glitch — hold current state so detection progress isn't lost
@@ -138,7 +146,40 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
 
         // Calibration phase — collect baseline before scoring begins
         if (calibrationEnabled && currentState == FatigueState.CALIBRATING) {
-            if (calibrationStartMs < 0) calibrationStartMs = currentTime
+            // Stabilization gate: wait for CALIBRATION_STABILIZATION_MS of consecutive
+            // frames with eyes clearly open before starting to collect samples. Any frame
+            // with low openness resets the run. Without this, the first frames right
+            // after tapping Start pollute the baseline and inflate eyeClosedThreshold.
+            if (calibrationStartMs < 0) {
+                if (eyeOpenness >= CALIBRATION_STABILIZATION_MIN_OPENNESS) {
+                    if (calibrationEligibleSinceMs < 0) calibrationEligibleSinceMs = currentTime
+                    if (currentTime - calibrationEligibleSinceMs >= CALIBRATION_STABILIZATION_MS) {
+                        calibrationStartMs = currentTime
+                    } else {
+                        return FatigueAssessment(
+                            score = 0f,
+                            fatigueState = FatigueState.CALIBRATING,
+                            blinkRate = 0f,
+                            isYawning = false,
+                            isFaceDetected = true,
+                            timestampMs = currentTime,
+                            calibrationProgress = 0f,
+                        )
+                    }
+                } else {
+                    calibrationEligibleSinceMs = -1L
+                    return FatigueAssessment(
+                        score = 0f,
+                        fatigueState = FatigueState.CALIBRATING,
+                        blinkRate = 0f,
+                        isYawning = false,
+                        isFaceDetected = true,
+                        timestampMs = currentTime,
+                        calibrationProgress = 0f,
+                    )
+                }
+            }
+
             calibrationSamples.add(eyeOpenness)
 
             val elapsed = currentTime - calibrationStartMs
@@ -271,6 +312,7 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         transitionLastCheckMs = 0L
         noFaceStartTime = null
         calibrationStartMs = -1L
+        calibrationEligibleSinceMs = -1L
         calibrationSamples.clear()
         eyeClosedThreshold = EYE_CLOSED_THRESHOLD_DEFAULT
         eyeOpenThreshold = EYE_OPEN_THRESHOLD_DEFAULT

@@ -192,6 +192,13 @@ class MonitoringService : Service(), LifecycleOwner {
         stopLocationUpdates()
         stopSensorUpdates()
 
+        // Release camera + MediaPipe now. Otherwise the bound MonitoringScreen keeps this
+        // service alive across Stop→Start cycles, so onDestroy never fires and the next
+        // startCamera short-circuits — leaving the old FaceAnalyzer feeding the new scorer
+        // with no warmup gap, which caused calibration to sample the user mid-tap and
+        // inflate the score at the start of the second session.
+        cameraManager.stopCamera()
+
         // Finalize the session summary NOW. The bound MonitoringScreen keeps this instance
         // alive across consecutive start→stop→start cycles, so onDestroy would not fire
         // between them — the previous session would be overwritten in memory and lose its

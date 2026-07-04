@@ -177,6 +177,65 @@ class FatigueScorerTest {
     }
 
     @Test
+    fun `calibration waits for stability before collecting samples`() {
+        val calibratingScorer = FatigueScorer(calibrationEnabled = true)
+        var t = 1000L
+
+        // 2 seconds of unstable framing: openness alternating between 0.3 and 0.6.
+        // Every low-openness frame resets the stabilization run, so calibration must
+        // never begin during this phase — even after enough time to fill 7 s of samples.
+        repeat(20) {
+            calibratingScorer.processFrame(FatigueMetrics(0.3f, 0.3f, 0.1f, true, t)); t += 100
+            val assessment = calibratingScorer.processFrame(FatigueMetrics(0.6f, 0.6f, 0.1f, true, t)); t += 100
+            assertEquals(FatigueState.CALIBRATING, assessment.fatigueState)
+            assertEquals(0f, assessment.calibrationProgress, 0.001f)
+        }
+
+        // 1.5 s of stable, clearly-open frames — stabilization gate opens, collection starts.
+        val stableStart = t
+        while (t - stableStart < 1500L) {
+            val a = calibratingScorer.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t))
+            assertEquals(FatigueState.CALIBRATING, a.fatigueState)
+            // Still in stabilization → progress is still 0
+            assertEquals(0f, a.calibrationProgress, 0.001f)
+            t += 100
+        }
+
+        // Next stable frame should have crossed the 1.5 s gate and started actual collection.
+        val firstCollectFrame = calibratingScorer.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t))
+        assertEquals(FatigueState.CALIBRATING, firstCollectFrame.fatigueState)
+        // Progress > 0 means calibrationStartMs has been set and samples are being collected.
+        assertTrue("Collection should have started (progress > 0)", firstCollectFrame.calibrationProgress > 0f)
+    }
+
+    @Test
+    fun `consecutive scorer instances do not inflate score at start of second session`() {
+        // Simulates the reported bug: two Start→Stop cycles on the MonitoringScreen with
+        // calibration enabled. Each session gets a fresh scorer (mirrors MonitoringService
+        // recreating it on startMonitoring). After the second session's calibration + a
+        // handful of normal frames, the score must stay well below WARNING (40) — the
+        // regression symptom is a jump to 60–70 within a few hundred milliseconds.
+        fun runSessionAndReturnFinalScore(startTime: Long): Float {
+            val s = FatigueScorer(calibrationEnabled = true)
+            var t = startTime
+            // 2 s of well-framed frames to pass the 1.5 s stabilization gate.
+            repeat(20) { s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t)); t += 100 }
+            // 7 s of calibration data with realistic open-eye openness ~0.85.
+            repeat(70) { s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t)); t += 100 }
+            // 30 frames (~1 s) of normal usage with openness 0.6 — well above any sane
+            // calibrated threshold. Score must remain low.
+            var last = s.processFrame(FatigueMetrics(0.6f, 0.6f, 0.1f, true, t))
+            repeat(29) { t += 100; last = s.processFrame(FatigueMetrics(0.6f, 0.6f, 0.1f, true, t)) }
+            return last.score
+        }
+
+        val firstScore = runSessionAndReturnFinalScore(1000L)
+        val secondScore = runSessionAndReturnFinalScore(1_000_000L) // large gap simulates a fresh session
+        assertTrue("First session final score should be low ($firstScore)", firstScore < 30f)
+        assertTrue("Second session final score should not be inflated ($secondScore)", secondScore < 30f)
+    }
+
+    @Test
     fun `Reset clears internal state`() {
         // Trigger a yawn
         var currentTime = 1000L
