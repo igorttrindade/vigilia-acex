@@ -148,7 +148,10 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
     // Consecutive frames below the stabilization openness threshold — tolerates natural
     // blinks without resetting the eligibility timer.
     private var calibrationBelowCount = 0
-    private val calibrationSamples = mutableListOf<Float>()
+    // Pairs of (timestampMs, openness). Timestamps are kept so finishCalibration() can
+    // seed the perclosWindow with these frames, avoiding a zero-history transient right
+    // when state transitions to NORMAL.
+    private val calibrationSamples = mutableListOf<Pair<Long, Float>>()
     private var eyeClosedThreshold = EYE_CLOSED_THRESHOLD_DEFAULT
     private var eyeOpenThreshold = EYE_OPEN_THRESHOLD_DEFAULT
 
@@ -234,7 +237,7 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
                 }
             }
 
-            calibrationSamples.add(eyeOpenness)
+            calibrationSamples.add(currentTime to eyeOpenness)
 
             val elapsed = currentTime - calibrationStartMs
             val progress = (elapsed.toFloat() / CALIBRATION_DURATION_MS).coerceIn(0f, 1f)
@@ -414,15 +417,29 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
             Log.w("FatigueScorer", "Calibration skipped: only ${calibrationSamples.size} samples, keeping defaults")
             return
         }
-        val sorted = calibrationSamples.sorted()
-        val p90Index = ((sorted.size - 1) * 0.90f).toInt()
-        val baseline = sorted[p90Index]
+        val opennessSorted = calibrationSamples.map { it.second }.sorted()
+        val p90Index = ((opennessSorted.size - 1) * 0.90f).toInt()
+        val baseline = opennessSorted[p90Index]
         eyeClosedThreshold = (baseline * EYE_CLOSED_RATIO).coerceIn(EYE_CLOSED_MIN, EYE_CLOSED_MAX)
         eyeOpenThreshold = (eyeClosedThreshold + 0.10f).coerceIn(
             eyeClosedThreshold + 0.05f,
             (eyeClosedThreshold + 0.20f).coerceAtMost(0.90f),
         )
-        Log.d("FatigueScorer", "Calibration done: baseline=$baseline closed=$eyeClosedThreshold open=$eyeOpenThreshold samples=${calibrationSamples.size}")
+
+        // Seed the PERCLOS window with the just-collected calibration frames re-evaluated
+        // against the new threshold. Without seeding, the buffer is empty when state flips
+        // to NORMAL — a single natural blink then inflates perclos to 60-80 % (5 closed
+        // frames out of 6 total) and the score spikes right after calibration.
+        perclosWindow.clear()  // defensive
+        for ((ts, openness) in calibrationSamples) {
+            perclosWindow.addLast(FrameRecord(ts, openness < eyeClosedThreshold))
+        }
+        // Anchor blink warmup at the start of calibration so BLINK_MIN_OBSERVATION_MS (30s)
+        // ticks in parallel with data collection — otherwise blink deviation only starts
+        // penalizing 30 s after calibration ends, which is unnecessarily conservative.
+        monitoringStartMs = calibrationSamples.first().first
+
+        Log.d("FatigueScorer", "Calibration done: baseline=$baseline closed=$eyeClosedThreshold open=$eyeOpenThreshold samples=${calibrationSamples.size} seededPerclos=${perclosWindow.size}")
     }
 
     private fun calculateBlinkDeviationScore(blinkRate: Float): Float {

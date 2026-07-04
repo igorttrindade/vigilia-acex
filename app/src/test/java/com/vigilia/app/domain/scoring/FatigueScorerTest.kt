@@ -445,6 +445,61 @@ class FatigueScorerTest {
     }
 
     @Test
+    fun `score stays low right after calibration ends`() {
+        // Regression for the reported behavior: score used to jump after calibration
+        // because the perclosWindow started empty. Seeding it with calibration frames
+        // should keep the score close to 0 through the transition.
+        val s = FatigueScorer(calibrationEnabled = true)
+        var t = 1000L
+
+        // Feed 9 s of clearly-open frames: stabilization gate (800 ms) + full 7 s
+        // collection window + margin.
+        repeat(90) { s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t)); t += 100 }
+
+        // At this point calibration has ended and currentState should be NORMAL. Feed
+        // 30 more open frames and assert the score never goes above a small threshold.
+        var maxScore = 0f
+        repeat(30) {
+            val a = s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t))
+            assertEquals(FatigueState.NORMAL, a.fatigueState)
+            maxScore = maxOf(maxScore, a.score)
+            t += 100
+        }
+        assertTrue("Score should stay very low right after calibration (max was $maxScore)", maxScore < 5f)
+    }
+
+    @Test
+    fun `single blink right after calibration does not spike score`() {
+        // A single blink (5 closed frames) immediately after calibration used to inflate
+        // PERCLOS to 60-80 % because the empty buffer had no history to dilute it. With
+        // the seeded buffer (~90 frames from calibration), the same blink adds ≈5% of
+        // closed frames and the score stays low.
+        val s = FatigueScorer(calibrationEnabled = true)
+        var t = 1000L
+
+        // Complete calibration with clean open frames.
+        repeat(90) { s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t)); t += 100 }
+
+        // Blink: 5 frames closed
+        var maxScore = 0f
+        repeat(5) {
+            val a = s.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, t))
+            maxScore = maxOf(maxScore, a.score)
+            t += 100
+        }
+        // Followed by 30 open frames
+        repeat(30) {
+            val a = s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t))
+            maxScore = maxOf(maxScore, a.score)
+            t += 100
+        }
+        assertTrue(
+            "A single post-calibration blink should not spike the score (max was $maxScore)",
+            maxScore < 15f,
+        )
+    }
+
+    @Test
     fun `Reset clears internal state`() {
         // Trigger a yawn
         var currentTime = 1000L
