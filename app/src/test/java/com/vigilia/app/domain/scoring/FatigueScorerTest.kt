@@ -130,9 +130,9 @@ class FatigueScorerTest {
             currentTime += 100
         }
 
-        // Now push score above 55 with closed eyes + yawn. The very first frame that
-        // exceeds 55 is when the scorer sets transitionStartTime = currentTime.
-        while (scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.8f, true, currentTime)).score <= 55f) {
+        // Now push score above 70 with closed eyes + yawn. The very first frame that
+        // exceeds 70 is when the scorer sets transitionStartTime = currentTime.
+        while (scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.8f, true, currentTime)).score <= 70f) {
             currentTime += 100
         }
 
@@ -233,6 +233,89 @@ class FatigueScorerTest {
         val secondScore = runSessionAndReturnFinalScore(1_000_000L) // large gap simulates a fresh session
         assertTrue("First session final score should be low ($firstScore)", firstScore < 30f)
         assertTrue("Second session final score should not be inflated ($secondScore)", secondScore < 30f)
+    }
+
+    @Test
+    fun `look away frames do not inflate perclos`() {
+        // 30 frames with eyes reading "closed" (openness=0.1) but head clearly turned
+        // (yaw=35°). The scorer must skip these frames — perclos stays 0, score stays 0.
+        var t = 1000L
+        repeat(30) {
+            val a = scorer.processFrame(
+                FatigueMetrics(
+                    leftEyeOpenProbability = 0.1f,
+                    rightEyeOpenProbability = 0.1f,
+                    mouthOpenProbability = 0.1f,
+                    isFaceDetected = true,
+                    timestampMs = t,
+                    headYawDegrees = 35f,
+                )
+            )
+            assertEquals(0f, a.score, 0.01f)
+            t += 100
+        }
+    }
+
+    @Test
+    fun `perclos buffer survives a brief look away without inflating`() {
+        // Frontal closed-eye frames accumulate PERCLOS → score climbs.
+        var t = 1000L
+        repeat(60) {
+            scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, t))
+            t += 100
+        }
+        val scoreBeforeLookAway = scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, t)).score
+        assertTrue("Score should be climbing before look-away ($scoreBeforeLookAway)", scoreBeforeLookAway > 10f)
+
+        // Look-away phase: 20 frames with head turned. Buffer stays frozen, score cannot climb further.
+        var scoreDuringLookAway = scoreBeforeLookAway
+        repeat(20) {
+            t += 100
+            scoreDuringLookAway = scorer.processFrame(
+                FatigueMetrics(0.1f, 0.1f, 0.1f, true, t, headYawDegrees = 40f)
+            ).score
+        }
+        // Score during look-away must not exceed the pre-look-away score by more than smoothing tail
+        // (the exponential smoother continues on the frozen rawScore, so a small delta is OK).
+        assertTrue(
+            "Score should not climb during look-away (${scoreBeforeLookAway} → ${scoreDuringLookAway})",
+            scoreDuringLookAway <= scoreBeforeLookAway + 5f,
+        )
+
+        // Return to frontal with eyes open — score drains as the buffer refills with open frames.
+        repeat(60) {
+            t += 100
+            scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, true, t))
+        }
+        val finalScore = scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, true, t)).score
+        assertTrue("Score should have drained after eyes-open frontal phase ($finalScore)", finalScore < scoreBeforeLookAway)
+    }
+
+    @Test
+    fun `fatigued now requires more than perclos alone`() {
+        // Feed only closed-eye frontal frames indefinitely (no yawn, no blinks). rawScore
+        // steady state = perclos * 65 = 65 pts. With the 70-pt FATIGUED threshold restored,
+        // the state must reach WARNING but never FATIGUED without a yawn or blink deviation.
+        var t = 1000L
+        var lastState = FatigueState.NORMAL
+        // Run for 15 s of continuous eyes-closed frontal — plenty to hit steady state and
+        // trip the NORMAL→WARNING transition (score>40 sustained 2s).
+        repeat(150) {
+            lastState = scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, t)).fatigueState
+            t += 100
+        }
+        assertEquals("Should reach WARNING with sustained PERCLOS alone", FatigueState.WARNING, lastState)
+
+        // Continue for another 10 s. With smoothed score converging to ~65 (below 70),
+        // it must never promote to FATIGUED.
+        repeat(100) {
+            val a = scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, t))
+            assertTrue(
+                "Should not promote to FATIGUED without yawn/blink deviation (state=${a.fatigueState} score=${a.score})",
+                a.fatigueState != FatigueState.FATIGUED,
+            )
+            t += 100
+        }
     }
 
     @Test

@@ -7,7 +7,13 @@ data class FatigueMetrics(
     val rightEyeOpenProbability: Float,
     val mouthOpenProbability: Float,
     val isFaceDetected: Boolean,
-    val timestampMs: Long
+    val timestampMs: Long,
+    // Head orientation in degrees (0 = frontal). Positive/negative sign is defined by the
+    // producer (FaceAnalyzer) — the scorer only uses absolute magnitudes and directional
+    // thresholds. Defaults to 0 so tests and callers that don't measure orientation
+    // continue to behave as before (treated as looking straight at the camera).
+    val headYawDegrees: Float = 0f,
+    val headPitchDegrees: Float = 0f,
 )
 
 data class FatigueAssessment(

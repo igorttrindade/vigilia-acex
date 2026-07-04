@@ -14,6 +14,8 @@ import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
 import com.vigilia.app.domain.model.FatigueMetrics
 import kotlin.math.abs
+import kotlin.math.asin
+import kotlin.math.atan2
 
 /**
  * Extracts face metrics from camera frames using MediaPipe FaceLandmarker.
@@ -52,6 +54,7 @@ class FaceAnalyzer(
                     .setRunningMode(RunningMode.IMAGE)
                     .setNumFaces(1)
                     .setOutputFaceBlendshapes(true)
+                    .setOutputFacialTransformationMatrixes(true)
                     .setMinFaceDetectionConfidence(0.5f)
                     .setMinFacePresenceConfidence(0.5f)
                     .build()
@@ -84,6 +87,11 @@ class FaceAnalyzer(
 
             val landmarksList = result.faceLandmarks()
 
+            // Head orientation from MediaPipe's facial transformation matrix (yaw/pitch in degrees,
+            // frontal = 0). Used downstream to pause PERCLOS accumulation when the driver looks
+            // away — natural in a vehicle (mirrors, dashboard) but was being scored as fatigue.
+            val (headYaw, headPitch) = extractYawPitchDegrees(result.facialTransformationMatrixes())
+
             val metrics = if (blendshapesOpt.isPresent && blendshapesOpt.get().isNotEmpty()) {
                 val shapes = blendshapesOpt.get()[0]
                 val eyeBlinkLeft  = shapes.find { it.categoryName() == "eyeBlinkLeft"  }?.score()
@@ -109,13 +117,15 @@ class FaceAnalyzer(
                     val finalLeft  = minOf(blendLeft, earLeft)
                     val finalRight = minOf(blendRight, earRight)
 
-                    Log.d("FaceAnalyzer", "blinkL=$eyeBlinkLeft blinkR=$eyeBlinkRight jawOpen=$jawOpen earL=$earLeft earR=$earRight")
+                    Log.d("FaceAnalyzer", "blinkL=$eyeBlinkLeft blinkR=$eyeBlinkRight jawOpen=$jawOpen earL=$earLeft earR=$earRight yaw=$headYaw pitch=$headPitch")
                     FatigueMetrics(
                         leftEyeOpenProbability  = finalLeft,
                         rightEyeOpenProbability = finalRight,
                         mouthOpenProbability    = jawOpen,
                         isFaceDetected          = true,
                         timestampMs             = System.nanoTime() / 1_000_000,
+                        headYawDegrees          = headYaw,
+                        headPitchDegrees        = headPitch,
                     )
                 }
             } else {
@@ -172,6 +182,43 @@ class FaceAnalyzer(
         return Pair(
             (leftEar  / EAR_OPEN_REFERENCE).coerceIn(0f, 1f),
             (rightEar / EAR_OPEN_REFERENCE).coerceIn(0f, 1f),
+        )
+    }
+
+    /**
+     * Decomposes MediaPipe's 4×4 facial transformation matrix into head yaw and pitch
+     * (degrees, frontal = 0). Roll is not used downstream so it is skipped.
+     *
+     * MediaPipe stores the matrix column-major (16-element FloatArray), so element access is
+     * m[col*4 + row]. Uses a Y-X-Z Euler decomposition (yaw around Y, pitch around X):
+     *   pitch = asin(-R[1][2]) = asin(-m[9])
+     *   yaw   = atan2(R[0][2], R[2][2]) = atan2(m[8], m[10])
+     *
+     * Sign convention (verified in-device with a debug log): positive yaw = head turned
+     * to the driver's right; positive pitch = head tilted up. If a device reports mirrored
+     * signs due to camera orientation, flip here. The downstream scorer only uses the
+     * absolute magnitudes for the yaw check, so mirror errors on yaw are harmless.
+     */
+    private fun extractYawPitchDegrees(
+        matrixesOpt: java.util.Optional<List<FloatArray>>,
+    ): Pair<Float, Float> {
+        if (!matrixesOpt.isPresent) return Pair(0f, 0f)
+        val list = matrixesOpt.get()
+        if (list.isEmpty()) return Pair(0f, 0f)
+        val m = list[0]
+        if (m.size < 16) return Pair(0f, 0f)
+
+        val r02 = m[8]
+        val r12 = m[9]
+        val r22 = m[10]
+
+        val pitchRad = asin((-r12).coerceIn(-1f, 1f))
+        val yawRad = atan2(r02, r22)
+
+        val radToDeg = 180.0 / Math.PI
+        return Pair(
+            (yawRad * radToDeg).toFloat(),
+            (pitchRad * radToDeg).toFloat(),
         )
     }
 

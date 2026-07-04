@@ -18,8 +18,10 @@ import java.util.ArrayDeque
 class FatigueScorer(private val calibrationEnabled: Boolean = true) {
 
     private companion object {
-        // Shorter window → PERCLOS accumulates faster; eyes closing for 5s fills ~83% of window
-        const val PERCLOS_WINDOW_MS = 6_000L
+        // 30-second rolling window aligned with the PERCLOS literature and CLAUDE.md.
+        // Was 6_000L briefly — that made the score sensitive to any 3-5s episode of
+        // "eyes appear closed" (which happens easily when the driver glances aside).
+        const val PERCLOS_WINDOW_MS = 30_000L
         const val BLINK_WINDOW_MS = 60_000L
         const val YAWN_THRESHOLD_PROB = 0.38f
         const val YAWN_DURATION_MS = 1_500L
@@ -44,8 +46,10 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
 
         const val TRANSITION_NORMAL_TO_WARNING_SCORE = 40f
         const val TRANSITION_NORMAL_TO_WARNING_MS = 2_000L
-        // Lowered from 70 → 55: PERCLOS=1.0 alone (65 pts) now exceeds this threshold
-        const val TRANSITION_WARNING_TO_FATIGUED_SCORE = 55f
+        // Restored to 70 (was 55). At 55, PERCLOS=~0.85 alone (55 pts of the 65-pt weight)
+        // was enough to promote to FATIGUED — an isolated look-away episode could trigger it.
+        // 70 requires a combination of PERCLOS + blink deviation + yawn, matching CLAUDE.md.
+        const val TRANSITION_WARNING_TO_FATIGUED_SCORE = 70f
         const val TRANSITION_WARNING_TO_FATIGUED_MS = 4_000L
         const val TRANSITION_WARNING_TO_NORMAL_SCORE = 25f
         const val TRANSITION_WARNING_TO_NORMAL_MS = 5_000L
@@ -79,6 +83,14 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         const val BLINK_MAX_DURATION_MS = 500L
         // Warmup: don't penalize low blink rate until enough data has been collected
         const val BLINK_MIN_OBSERVATION_MS = 30_000L
+
+        // Look-away thresholds: when the driver's head is rotated beyond these limits (mirrors,
+        // dashboard, side windows), MediaPipe's eye blendshapes inflate because the eyelids
+        // appear more closed in oblique perspective. Pausing PERCLOS/blink/yawn accumulation
+        // during these frames prevents falsely scoring natural in-vehicle looking as fatigue.
+        const val LOOK_AWAY_YAW_DEGREES = 25f
+        const val LOOK_AWAY_PITCH_DEGREES_UP = 20f     // head tilted upward
+        const val LOOK_AWAY_PITCH_DEGREES_DOWN = 25f   // head tilted downward (slightly more permissive — driver glances at dashboard)
     }
 
     private data class FrameRecord(val timestampMs: Long, val isEyeClosed: Boolean)
@@ -201,11 +213,24 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
             }
         }
 
+        // Look-away detection: when head yaw/pitch is outside the natural forward range, the
+        // driver is checking mirrors/dashboard/side — a normal in-vehicle behavior. MediaPipe's
+        // blendshapes read those frames as "eyes more closed" because eyelids look shorter in
+        // oblique perspective, so counting them toward PERCLOS/blink/yawn produces false alerts.
+        // We pause accumulation instead: the buffer keeps its prior frames, no new closed/open
+        // frames are added, blinks aren't confirmed, and yawn timers reset. Aged frames still
+        // drain from the buffer by timestamp so a long look-away doesn't leave stale data behind.
+        val isLookingAway = kotlin.math.abs(metrics.headYawDegrees) > LOOK_AWAY_YAW_DEGREES ||
+                metrics.headPitchDegrees > LOOK_AWAY_PITCH_DEGREES_UP ||
+                metrics.headPitchDegrees < -LOOK_AWAY_PITCH_DEGREES_DOWN
+
         val isEyeClosed = metrics.leftEyeOpenProbability < eyeClosedThreshold ||
                 metrics.rightEyeOpenProbability < eyeClosedThreshold
 
-        // 1. PERCLOS Calculation
-        perclosWindow.addLast(FrameRecord(currentTime, isEyeClosed))
+        // 1. PERCLOS Calculation — skip the addLast when looking away, but always drain by age.
+        if (!isLookingAway) {
+            perclosWindow.addLast(FrameRecord(currentTime, isEyeClosed))
+        }
         while (perclosWindow.isNotEmpty() && currentTime - perclosWindow.first().timestampMs > PERCLOS_WINDOW_MS) {
             perclosWindow.removeFirst()
         }
@@ -219,36 +244,45 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         // asymmetric readings (e.g. one eye inflated by glasses reflection).
         // Temporal debounce: requires BLINK_MIN_CLOSED_FRAMES consecutive frames below threshold.
         // Max duration: closure > BLINK_MAX_DURATION_MS is sustained (PERCLOS), not a blink.
+        // Paused entirely when looking away — an eye that looks closed in oblique perspective
+        // isn't a real blink.
         val eyeMin = minOf(metrics.leftEyeOpenProbability, metrics.rightEyeOpenProbability)
-        if (!isBlinking) {
-            if (eyeMin < eyeClosedThreshold) {
-                closedFrameCount++
-                if (closedFrameCount >= BLINK_MIN_CLOSED_FRAMES) {
-                    isBlinking = true
-                    blinkStartTime = currentTime
+        if (!isLookingAway) {
+            if (!isBlinking) {
+                if (eyeMin < eyeClosedThreshold) {
+                    closedFrameCount++
+                    if (closedFrameCount >= BLINK_MIN_CLOSED_FRAMES) {
+                        isBlinking = true
+                        blinkStartTime = currentTime
+                        closedFrameCount = 0
+                    }
+                } else {
                     closedFrameCount = 0
                 }
-            } else {
+            } else if (blinkStartTime != null && currentTime - blinkStartTime!! > BLINK_MAX_DURATION_MS) {
+                // Sustained closure — PERCLOS territory, discard as blink
+                isBlinking = false
+                blinkStartTime = null
+                closedFrameCount = 0
+            } else if (eyeMin > eyeOpenThreshold) {
+                blinkTimestamps.addLast(currentTime)
+                isBlinking = false
+                blinkStartTime = null
                 closedFrameCount = 0
             }
-        } else if (blinkStartTime != null && currentTime - blinkStartTime!! > BLINK_MAX_DURATION_MS) {
-            // Sustained closure — PERCLOS territory, discard as blink
-            isBlinking = false
-            blinkStartTime = null
-            closedFrameCount = 0
-        } else if (eyeMin > eyeOpenThreshold) {
-            blinkTimestamps.addLast(currentTime)
-            isBlinking = false
-            blinkStartTime = null
-            closedFrameCount = 0
         }
         while (blinkTimestamps.isNotEmpty() && currentTime - blinkTimestamps.first() > BLINK_WINDOW_MS) {
             blinkTimestamps.removeFirst()
         }
         val blinkRate = blinkTimestamps.size.toFloat()
 
-        // 3. Yawn Detection
-        if (metrics.mouthOpenProbability > YAWN_THRESHOLD_PROB) {
+        // 3. Yawn Detection — reset the yawn timers when looking away since the mouth is
+        // not reliably observable in oblique perspective. Prevents false yawn confirmations
+        // from side profile artifacts.
+        if (isLookingAway) {
+            yawnStartTime = null
+            yawnGraceStart = null
+        } else if (metrics.mouthOpenProbability > YAWN_THRESHOLD_PROB) {
             yawnGraceStart = null
             if (yawnStartTime == null) {
                 yawnStartTime = currentTime
@@ -289,7 +323,7 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         val rawScore = perclosContribution + blinkContribution + yawnContribution
         smoothedScore = (SMOOTHING_ALPHA * rawScore) + (1f - SMOOTHING_ALPHA) * smoothedScore
 
-        Log.d("FatigueScorer", "score=$smoothedScore state=$currentState perclos=$perclos blinkRate=$blinkRate yawning=$isCurrentlyYawning")
+        Log.d("FatigueScorer", "score=$smoothedScore state=$currentState perclos=$perclos blinkRate=$blinkRate yawning=$isCurrentlyYawning lookAway=$isLookingAway yaw=${metrics.headYawDegrees} pitch=${metrics.headPitchDegrees}")
 
         // 5. State Machine with Hysteresis
         updateState(smoothedScore, currentTime)
