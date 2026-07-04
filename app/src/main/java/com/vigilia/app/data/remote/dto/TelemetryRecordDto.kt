@@ -25,4 +25,10 @@ data class TelemetryRecordDto(
     @SerialName("gyro_x") val gyroX: Float? = null,
     @SerialName("gyro_y") val gyroY: Float? = null,
     @SerialName("gyro_z") val gyroZ: Float? = null,
+    // Sub-scores from FatigueScorer — new columns; Supabase schema must add them
+    // (see plan). Old rows in CSV / server default to null.
+    @SerialName("perclos") val perclos: Float? = null,
+    @SerialName("perclos_contribution") val perclosContribution: Float? = null,
+    @SerialName("blink_contribution") val blinkContribution: Float? = null,
+    @SerialName("yawn_contribution") val yawnContribution: Float? = null,
 )

@@ -130,6 +130,12 @@ class SyncRepository(private val context: Context) {
                 gyroX = if (p.size > 15) p[15].toFloatOrNull() else null,
                 gyroY = if (p.size > 16) p[16].toFloatOrNull() else null,
                 gyroZ = if (p.size > 17) p[17].toFloatOrNull() else null,
+                // Optional sub-score columns (added after the original 18-column format).
+                // Old CSVs from previous sessions don't have these and stay null.
+                perclos = if (p.size > 18) p[18].toFloatOrNull() else null,
+                perclosContribution = if (p.size > 19) p[19].toFloatOrNull() else null,
+                blinkContribution = if (p.size > 20) p[20].toFloatOrNull() else null,
+                yawnContribution = if (p.size > 21) p[21].toFloatOrNull() else null,
             )
         } catch (e: Exception) {
             Log.w("SyncRepository", "Failed to parse CSV line: $line", e)

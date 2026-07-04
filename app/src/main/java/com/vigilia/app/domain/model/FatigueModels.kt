@@ -24,6 +24,13 @@ data class FatigueAssessment(
     val isFaceDetected: Boolean,
     val timestampMs: Long,
     val calibrationProgress: Float = 0f,
+    // Sub-scores exposed for field diagnostics (also written to telemetry CSV).
+    // Lets us dissect the aggregated `score` and tune weights from real data instead
+    // of guessing. All default to 0 for backwards compatibility.
+    val perclos: Float = 0f,               // 0..1 ratio of eye-closed frames in the PERCLOS window
+    val perclosContribution: Float = 0f,   // 0..SCORE_WEIGHT_PERCLOS
+    val blinkContribution: Float = 0f,     // 0..SCORE_WEIGHT_BLINK
+    val yawnContribution: Float = 0f,      // 0 or SCORE_WEIGHT_YAWN
 )
 
 data class SessionSummary(
@@ -56,4 +63,11 @@ data class TelemetryRecord(
     val gyroX: Float? = null,
     val gyroY: Float? = null,
     val gyroZ: Float? = null,
+    // Sub-scores from FatigueScorer for post-hoc analysis. Defaults keep old callers
+    // (and old CSV rows) working — writer omits them if not populated? no, always writes,
+    // reader tolerates them missing on old CSV rows.
+    val perclos: Float = 0f,
+    val perclosContribution: Float = 0f,
+    val blinkContribution: Float = 0f,
+    val yawnContribution: Float = 0f,
 )

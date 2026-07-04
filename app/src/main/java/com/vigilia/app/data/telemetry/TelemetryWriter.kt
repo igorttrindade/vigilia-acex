@@ -78,7 +78,9 @@ class TelemetryWriter private constructor(
         }
 
         val file = File(folder, "session.csv")
-        file.writeText("sessionId,timestamp,score,state,eyeOpenness,blinkRate,isYawning,isFaceDetected,alertActive,latitude,longitude,speed,accelX,accelY,accelZ,gyroX,gyroY,gyroZ\n")
+        // Columns 0-17: core telemetry (unchanged). Columns 18-21: sub-scores from
+        // FatigueScorer, exposed so a session's aggregated score can be diagnosed post-hoc.
+        file.writeText("sessionId,timestamp,score,state,eyeOpenness,blinkRate,isYawning,isFaceDetected,alertActive,latitude,longitude,speed,accelX,accelY,accelZ,gyroX,gyroY,gyroZ,perclos,perclosContribution,blinkContribution,yawnContribution\n")
 
         currentSessionId = sessionId
         sessionFolder = folder
@@ -123,7 +125,11 @@ class TelemetryWriter private constructor(
                     append(record.accelZ?.toString() ?: "").append(",")
                     append(record.gyroX?.toString() ?: "").append(",")
                     append(record.gyroY?.toString() ?: "").append(",")
-                    append(record.gyroZ?.toString() ?: "").append("\n")
+                    append(record.gyroZ?.toString() ?: "").append(",")
+                    append(record.perclos).append(",")
+                    append(record.perclosContribution).append(",")
+                    append(record.blinkContribution).append(",")
+                    append(record.yawnContribution).append("\n")
                 }
 
                 FileWriter(file, true).use { writer ->

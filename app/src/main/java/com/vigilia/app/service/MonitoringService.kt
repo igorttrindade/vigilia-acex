@@ -294,6 +294,10 @@ class MonitoringService : Service(), LifecycleOwner {
                         gyroX = lastGyroX,
                         gyroY = lastGyroY,
                         gyroZ = lastGyroZ,
+                        perclos = assessment.perclos,
+                        perclosContribution = assessment.perclosContribution,
+                        blinkContribution = assessment.blinkContribution,
+                        yawnContribution = assessment.yawnContribution,
                     )
                 )
             }

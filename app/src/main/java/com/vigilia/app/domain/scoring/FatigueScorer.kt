@@ -34,9 +34,13 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         const val EYE_CLOSED_THRESHOLD_DEFAULT = 0.3f
         const val EYE_OPEN_THRESHOLD_DEFAULT = 0.4f
 
-        // PERCLOS raised to 65 so fully-closed eyes alone can push score above FATIGUED threshold
+        // PERCLOS is the primary fatigue signal (weight 65). Total sums to 105 (clamped
+        // to 100) so a *combination* is required to reach FATIGUED (>70), not any single
+        // signal alone. BLINK was 20 — a moderately high rate (25/min under focus / dry
+        // eyes) hit the max deviation and drove score into WARNING alongside PERCLOS.
+        // Lowered to 15 so blink is still a real signal but not a sole tipping factor.
         const val SCORE_WEIGHT_PERCLOS = 65f
-        const val SCORE_WEIGHT_BLINK = 20f
+        const val SCORE_WEIGHT_BLINK = 15f
         const val SCORE_WEIGHT_YAWN = 25f
 
         const val BLINK_RATE_MIN = 15f
@@ -51,7 +55,11 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         // 70 requires a combination of PERCLOS + blink deviation + yawn, matching CLAUDE.md.
         const val TRANSITION_WARNING_TO_FATIGUED_SCORE = 70f
         const val TRANSITION_WARNING_TO_FATIGUED_MS = 4_000L
-        const val TRANSITION_WARNING_TO_NORMAL_SCORE = 25f
+        // Was 25 — combined with the previously-inflated PERCLOS threshold (EYE_CLOSED_RATIO=0.60),
+        // score got stuck ~26-30 in baseline usage and recovery never converged. Now that the
+        // PERCLOS threshold is aligned with the PERCLOS-70 literature standard, 30 makes recovery
+        // reachable while still requiring a real drop in fatigue signals.
+        const val TRANSITION_WARNING_TO_NORMAL_SCORE = 30f
         const val TRANSITION_WARNING_TO_NORMAL_MS = 5_000L
         const val TRANSITION_FATIGUED_TO_WARNING_SCORE = 50f
         const val TRANSITION_FATIGUED_TO_WARNING_MS = 5_000L
@@ -67,15 +75,29 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         // Calibration
         const val CALIBRATION_DURATION_MS = 7_000L
         const val CALIBRATION_MIN_SAMPLES = 20
-        const val EYE_CLOSED_RATIO = 0.60f   // closed = baseline * this
+        // Was 0.60 — with baseline p90 ≈ 0.85, the calibrated eyeClosedThreshold came out at
+        // ~0.51, clamped by EYE_CLOSED_MAX = 0.60. Normally-open frames (openness 0.40–0.55)
+        // were classified as closed → PERCLOS inflated to 30–40 % steady state and false
+        // WARNINGs after ~30 s. Realigned with the PERCLOS-70 automotive standard: a frame
+        // counts as "closed" only when openness < 30 % of the calibrated open baseline.
+        const val EYE_CLOSED_RATIO = 0.40f   // was 0.60
         const val EYE_CLOSED_MIN = 0.15f
-        const val EYE_CLOSED_MAX = 0.60f
+        const val EYE_CLOSED_MAX = 0.45f     // was 0.60
         // Require a consecutive run of well-framed, eyes-open frames before calibration
         // starts collecting samples. Guards against sampling the user immediately after
         // they tap Start (dedo saindo do botão, cabeça inclinada), which would drag the
-        // baseline down and produce an inflated eyeClosedThreshold.
-        const val CALIBRATION_STABILIZATION_MS = 1_500L
-        const val CALIBRATION_STABILIZATION_MIN_OPENNESS = 0.5f
+        // baseline down and produce an inflated eyeClosedThreshold. The gate is bounded
+        // by a hard timeout so bad framing/lighting can't block calibration forever —
+        // the p90 during sample collection filters most residual noise anyway.
+        const val CALIBRATION_STABILIZATION_MS = 800L
+        const val CALIBRATION_STABILIZATION_MIN_OPENNESS = 0.35f
+        // Absolute upper bound for the stabilization gate. After this, sample collection
+        // starts even if the gate never converged (glasses reflections, low light, etc).
+        const val CALIBRATION_STABILIZATION_MAX_MS = 3_000L
+        // Absorb ~1 natural blink (~3 frames @ 30 fps) without resetting the eligibility
+        // timer. A sustained closure beyond this still resets — that's the correct signal
+        // that the eyes aren't reliably visible yet.
+        const val CALIBRATION_STABILIZATION_TOLERANCE_FRAMES = 3
 
         // Blink debounce: require this many consecutive frames below threshold before confirming closure
         const val BLINK_MIN_CLOSED_FRAMES = 3
@@ -120,6 +142,12 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
     // Calibration state
     private var calibrationStartMs = -1L
     private var calibrationEligibleSinceMs = -1L
+    // Timestamp of the very first face-detected frame in this session. Used to enforce
+    // CALIBRATION_STABILIZATION_MAX_MS as an absolute upper bound on the stabilization gate.
+    private var firstCalibrationFrameMs = -1L
+    // Consecutive frames below the stabilization openness threshold — tolerates natural
+    // blinks without resetting the eligibility timer.
+    private var calibrationBelowCount = 0
     private val calibrationSamples = mutableListOf<Float>()
     private var eyeClosedThreshold = EYE_CLOSED_THRESHOLD_DEFAULT
     private var eyeOpenThreshold = EYE_OPEN_THRESHOLD_DEFAULT
@@ -141,6 +169,8 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
                 blinkTimestamps.clear()
                 smoothedScore = 0f
                 calibrationEligibleSinceMs = -1L
+                firstCalibrationFrameMs = -1L
+                calibrationBelowCount = 0
                 createAssessment(0f, now, false, 0f, false)
             } else {
                 // Brief glitch — hold current state so detection progress isn't lost
@@ -159,27 +189,39 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         // Calibration phase — collect baseline before scoring begins
         if (calibrationEnabled && currentState == FatigueState.CALIBRATING) {
             // Stabilization gate: wait for CALIBRATION_STABILIZATION_MS of consecutive
-            // frames with eyes clearly open before starting to collect samples. Any frame
-            // with low openness resets the run. Without this, the first frames right
-            // after tapping Start pollute the baseline and inflate eyeClosedThreshold.
+            // frames with eyes clearly open before starting to collect samples. Tolerates
+            // brief closures (natural blinks) via calibrationBelowCount so the gate isn't
+            // reset every 3-4 s by normal blinking. Bounded by CALIBRATION_STABILIZATION_MAX_MS
+            // so bad framing/lighting/glasses reflections can't block calibration forever —
+            // sample collection starts anyway after the timeout and p90 filters residual noise.
             if (calibrationStartMs < 0) {
+                if (firstCalibrationFrameMs < 0) firstCalibrationFrameMs = currentTime
+                val elapsedInGate = currentTime - firstCalibrationFrameMs
+
                 if (eyeOpenness >= CALIBRATION_STABILIZATION_MIN_OPENNESS) {
                     if (calibrationEligibleSinceMs < 0) calibrationEligibleSinceMs = currentTime
-                    if (currentTime - calibrationEligibleSinceMs >= CALIBRATION_STABILIZATION_MS) {
-                        calibrationStartMs = currentTime
-                    } else {
-                        return FatigueAssessment(
-                            score = 0f,
-                            fatigueState = FatigueState.CALIBRATING,
-                            blinkRate = 0f,
-                            isYawning = false,
-                            isFaceDetected = true,
-                            timestampMs = currentTime,
-                            calibrationProgress = 0f,
-                        )
-                    }
+                    calibrationBelowCount = 0
                 } else {
-                    calibrationEligibleSinceMs = -1L
+                    calibrationBelowCount++
+                    if (calibrationBelowCount > CALIBRATION_STABILIZATION_TOLERANCE_FRAMES) {
+                        // Sustained low openness — reset the eligibility timer. Keep
+                        // firstCalibrationFrameMs so the 3 s hard cap still ticks.
+                        calibrationEligibleSinceMs = -1L
+                        calibrationBelowCount = 0
+                    }
+                }
+
+                val stableEnough = calibrationEligibleSinceMs >= 0 &&
+                        currentTime - calibrationEligibleSinceMs >= CALIBRATION_STABILIZATION_MS
+                val forceStart = elapsedInGate >= CALIBRATION_STABILIZATION_MAX_MS
+
+                if (stableEnough || forceStart) {
+                    if (forceStart && !stableEnough) {
+                        Log.w("FatigueScorer", "Calibration stabilization budget elapsed (${elapsedInGate}ms) — starting collection anyway")
+                    }
+                    calibrationStartMs = currentTime
+                    // fall through to sample collection below
+                } else {
                     return FatigueAssessment(
                         score = 0f,
                         fatigueState = FatigueState.CALIBRATING,
@@ -328,7 +370,17 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         // 5. State Machine with Hysteresis
         updateState(smoothedScore, currentTime)
 
-        return createAssessment(smoothedScore, currentTime, true, blinkRate, isCurrentlyYawning)
+        return createAssessment(
+            score = smoothedScore,
+            timestampMs = currentTime,
+            isFaceDetected = true,
+            blinkRate = blinkRate,
+            isYawning = isCurrentlyYawning,
+            perclos = perclos,
+            perclosContribution = perclosContribution,
+            blinkContribution = blinkContribution,
+            yawnContribution = yawnContribution,
+        )
     }
 
     fun reset() {
@@ -347,6 +399,8 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         noFaceStartTime = null
         calibrationStartMs = -1L
         calibrationEligibleSinceMs = -1L
+        firstCalibrationFrameMs = -1L
+        calibrationBelowCount = 0
         calibrationSamples.clear()
         eyeClosedThreshold = EYE_CLOSED_THRESHOLD_DEFAULT
         eyeOpenThreshold = EYE_OPEN_THRESHOLD_DEFAULT
@@ -435,6 +489,10 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         isFaceDetected: Boolean,
         blinkRate: Float,
         isYawning: Boolean,
+        perclos: Float = 0f,
+        perclosContribution: Float = 0f,
+        blinkContribution: Float = 0f,
+        yawnContribution: Float = 0f,
     ): FatigueAssessment {
         return FatigueAssessment(
             score = score.coerceIn(0f, 100f),
@@ -443,6 +501,10 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
             isYawning = isYawning,
             isFaceDetected = isFaceDetected,
             timestampMs = timestampMs,
+            perclos = perclos,
+            perclosContribution = perclosContribution,
+            blinkContribution = blinkContribution,
+            yawnContribution = yawnContribution,
         )
     }
 }
