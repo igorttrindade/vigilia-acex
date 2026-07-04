@@ -109,7 +109,7 @@ Exponential smoothing: `smoothedScore = 0.3 * rawScore + 0.7 * prev` (`SMOOTHING
 ### State machine — hysteresis transitions
 | From | To | Score threshold | Sustained duration |
 |---|---|---|---|
-| NORMAL   | WARNING  | > 40 | 2 000 ms |
+| NORMAL   | WARNING  | > 50 | 3 000 ms |
 | WARNING  | FATIGUED | > 70 | 4 000 ms |
 | WARNING  | NORMAL   | < 30 | 5 000 ms |
 | FATIGUED | WARNING  | < 50 | 5 000 ms |
@@ -144,7 +144,7 @@ While `isLookingAway` is true: `perclosWindow` doesn't receive `addLast()`; blin
 - `BLINK_MIN_CLOSED_FRAMES = 3` — debounce for confirming a closure.
 - `BLINK_MAX_DURATION_MS = 500L` — closure beyond this counts as PERCLOS, not a blink.
 - `BLINK_MIN_OBSERVATION_MS = 30 000L` — first 30 s don't penalize low blink rate (avoids spurious inflation before enough data is collected).
-- Rate deviation: healthy range `[15, 20]` blinks / 60 s; penalty scales linearly to the limits `[8, 25]`.
+- Rate deviation: healthy range `[15, 24]` blinks / 60 s; penalty scales linearly to the limits `[8, 32]`. The upper bound was widened from 20 → 24 because users focused on the front-camera app blink 20-26/min naturally (focus, dry eyes, lighting), which the original PERCLOS-literature range interpreted as pathological.
 
 ## Session lifecycle & threading
 
@@ -357,5 +357,6 @@ adb shell dumpsys power | grep vigilia
 - **`stopMonitoring()` is fully async** (commit `558a30b`) — no `runBlocking` on Main. The `TelemetryWriter.writeMutex` provides the ordering guarantee that used to require `join()`.
 - **WakeLock ceiling is 2 h, released on Stop** (commit `558a30b`) — the previous 10 h ceiling drained battery when `onDestroy()` didn't fire between Start/Stop cycles.
 - **Head yaw / pitch pause scoring during look-away** (commit `9f97457`) — mirrors, dashboard checks, side glances no longer inflate PERCLOS.
+- **Raise the WARNING trigger and widen the healthy blink range**: `TRANSITION_NORMAL_TO_WARNING_SCORE` 40 → 50, `TRANSITION_NORMAL_TO_WARNING_MS` 2 000 → 3 000, `BLINK_RATE_MAX` 20 → 24, `BLINK_DEVIATION_LIMIT_HIGH` 25 → 32. Even after the PERCLOS-70 realignment (`3c30b8a`), users blinking at 25/min (normal when focused on the front camera) were still hitting `blink deviation = 1.0` and landing near the WARNING threshold. The new numbers mean PERCLOS alone needs 77 % closure sustained 3 s, and blink deviation caps out at rates over 30/min — real fatigue signals still trigger, casual focused blinking does not. Recovery threshold (30) and FATIGUED gate (70) unchanged.
 - **Seed `perclosWindow` from calibration samples at the end of the collection phase** — otherwise the buffer is empty at the exact moment state flips to NORMAL, and a single natural blink (5 closed frames in a buffer of ~6) inflates PERCLOS to ~80 %, spiking the score right after calibration. `calibrationSamples` was extended to `MutableList<Pair<Long, Float>>` (timestamp + openness) so the samples can be re-evaluated against the newly-computed threshold and pushed into the window. `monitoringStartMs` is also anchored at the start of the collection phase so blink warmup runs in parallel with calibration.
 - **PERCLOS-70 realignment + sub-score telemetry**: `EYE_CLOSED_RATIO` dropped from 0.60 to 0.40, `EYE_CLOSED_MAX` from 0.60 to 0.45, `SCORE_WEIGHT_BLINK` from 20 to 15, `TRANSITION_WARNING_TO_NORMAL_SCORE` from 25 to 30. Before this the calibrated eye-closed threshold sat around 0.51, so normally-open frames were counted as closed → PERCLOS baseline was ~30 % (should be ~5 %), score got stuck around 26-30, and recovery from WARNING to NORMAL never converged (25 threshold unreachable). Also added four sub-score columns to `session.csv` (`perclos`, `perclosContribution`, `blinkContribution`, `yawnContribution`) and mirror fields in `FatigueAssessment` / `TelemetryRecord` / `TelemetryRecordDto` so future weight tuning can be data-driven instead of guesswork. Supabase schema needs matching columns before sync will populate them server-side (SQL migration is a manual TODO in that dashboard).

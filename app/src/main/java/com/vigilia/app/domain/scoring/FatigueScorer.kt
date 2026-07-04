@@ -43,13 +43,23 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
         const val SCORE_WEIGHT_BLINK = 15f
         const val SCORE_WEIGHT_YAWN = 25f
 
+        // The "healthy" blink range was 15-20/min from PERCLOS literature, but that
+        // literature assumes drivers looking at the road, not at a phone camera. Users
+        // focused on the app's front camera blink 20-26/min naturally (focus, dry eyes,
+        // ambient lighting). Widening MAX to 24 and the deviation ceiling to 32 keeps
+        // blink deviation useful for extreme rates (>30/min) without penalizing typical
+        // in-app usage.
         const val BLINK_RATE_MIN = 15f
-        const val BLINK_RATE_MAX = 20f
+        const val BLINK_RATE_MAX = 24f                   // was 20
         const val BLINK_DEVIATION_LIMIT_LOW = 8f
-        const val BLINK_DEVIATION_LIMIT_HIGH = 25f
+        const val BLINK_DEVIATION_LIMIT_HIGH = 32f       // was 25
 
-        const val TRANSITION_NORMAL_TO_WARNING_SCORE = 40f
-        const val TRANSITION_NORMAL_TO_WARNING_MS = 2_000L
+        // Was 40 + 2 s — even after the PERCLOS-70 realignment (`3c30b8a`) some users saw
+        // WARNING while just blinking normally. 50 + 3 s means PERCLOS alone needs 77 %
+        // closure sustained 3 s, and blink alone (max 15 pts) can never tip on its own —
+        // a combination of signals is required. FATIGUED gate (70) unchanged.
+        const val TRANSITION_NORMAL_TO_WARNING_SCORE = 50f
+        const val TRANSITION_NORMAL_TO_WARNING_MS = 3_000L
         // Restored to 70 (was 55). At 55, PERCLOS=~0.85 alone (55 pts of the 65-pt weight)
         // was enough to promote to FATIGUED — an isolated look-away episode could trigger it.
         // 70 requires a combination of PERCLOS + blink deviation + yawn, matching CLAUDE.md.

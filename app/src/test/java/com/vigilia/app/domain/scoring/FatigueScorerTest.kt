@@ -95,20 +95,20 @@ class FatigueScorerTest {
             currentTime += 100
         }
 
-        // Closed eyes drive PERCLOS up until score exceeds 40
-        while (scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, currentTime)).score <= 40f) {
+        // Closed eyes drive PERCLOS up until score exceeds 50
+        while (scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, currentTime)).score <= 50f) {
             currentTime += 100
         }
 
         val startTransitionTime = currentTime
-        // Sustained for 1.9s — must still be NORMAL
-        while (currentTime - startTransitionTime < 1900L) {
+        // Sustained for 2.9s — must still be NORMAL
+        while (currentTime - startTransitionTime < 2900L) {
             assertEquals(FatigueState.NORMAL, scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, currentTime)).fatigueState)
             currentTime += 100
         }
 
-        // At 2s threshold → WARNING
-        currentTime = startTransitionTime + 2000L
+        // At 3s threshold → WARNING
+        currentTime = startTransitionTime + 3000L
         assertEquals(FatigueState.WARNING, scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, currentTime)).fatigueState)
     }
 
@@ -496,6 +496,29 @@ class FatigueScorerTest {
         assertTrue(
             "A single post-calibration blink should not spike the score (max was $maxScore)",
             maxScore < 15f,
+        )
+    }
+
+    @Test
+    fun `elevated blink rate stays normal with widened healthy range`() {
+        // User complaint after 3c30b8a: "even blinking as a normal person" was pushing
+        // score into WARNING. Users focused on the front-camera app blink 20-26/min
+        // naturally. With BLINK_RATE_MAX widened from 20 to 24, a rate around 25/min
+        // now yields a mild deviation contribution instead of the maximum penalty.
+        // Feed 90 s of well-framed frames + one blink every 2.4 s (25/min). State
+        // must stay NORMAL end-to-end.
+        var t = 1000L
+        // Blink every 2.4 s: 21 frames open (openness 0.75) + 3 frames closed (blink).
+        // That gives 25 blinks in 60 s ≈ 37 blinks in 90 s → rate 24.7/min.
+        repeat(37) {
+            repeat(21) { scorer.processFrame(FatigueMetrics(0.75f, 0.75f, 0.1f, true, t)); t += 100 }
+            repeat(3)  { scorer.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, t)); t += 100 }
+        }
+        val finalAssessment = scorer.processFrame(FatigueMetrics(0.75f, 0.75f, 0.1f, true, t))
+        assertEquals(
+            "Elevated but normal blink rate must not trigger WARNING (state=${finalAssessment.fatigueState}, score=${finalAssessment.score})",
+            FatigueState.NORMAL,
+            finalAssessment.fatigueState,
         )
     }
 
