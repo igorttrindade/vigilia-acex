@@ -69,6 +69,10 @@ class MonitoringService : Service(), LifecycleOwner {
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var sensorManager: SensorManager
 
+    private val notificationManager: NotificationManager by lazy {
+        getSystemService(NotificationManager::class.java)
+    }
+
     private var wakeLock: PowerManager.WakeLock? = null
     private var ringtone: Ringtone? = null
     private var alertJob: Job? = null
@@ -191,6 +195,10 @@ class MonitoringService : Service(), LifecycleOwner {
         currentAssessment.value = null
         stopLocationUpdates()
         stopSensorUpdates()
+        // WakeLock was held throughout the session; release it now so battery doesn't drain
+        // while the bound MonitoringScreen keeps this service instance alive between sessions.
+        // onDestroy() still calls this too — releaseWakeLock() is idempotent.
+        releaseWakeLock()
 
         // Release camera + MediaPipe now. Otherwise the bound MonitoringScreen keeps this
         // service alive across Stop→Start cycles, so onDestroy never fires and the next
@@ -199,20 +207,24 @@ class MonitoringService : Service(), LifecycleOwner {
         // inflate the score at the start of the second session.
         cameraManager.stopCamera()
 
-        // Finalize the session summary NOW. The bound MonitoringScreen keeps this instance
-        // alive across consecutive start→stop→start cycles, so onDestroy would not fire
-        // between them — the previous session would be overwritten in memory and lose its
-        // session_summary.json (making it invisible in history).
-        runBlocking {
-            writerScope.coroutineContext[kotlinx.coroutines.Job]
-                ?.children?.toList()?.forEach { runCatching { it.join() } }
+        // Null sessionId synchronously so any handleAssessment already in flight sees it
+        // as null on the `val sId = sessionId ?: return` check and doesn't enqueue a new
+        // writeRecord for a session that's being torn down.
+        sessionId = null
+
+        // Finalize the session summary off the Main thread. TelemetryWriter.writeMutex
+        // serializes writeRecord() and stopSession() internally, so any writes still
+        // enqueued in writerScope will run cleanly before or after stopSession(); after
+        // stopSession() the writer's csvFile is null and further writes are no-ops.
+        // If a new session starts before this finalization completes, the guard-rail in
+        // TelemetryWriter.startSession() finalizes the orphan before creating the new one.
+        writerScope.launch {
             try {
                 telemetryWriter.stopSession()
             } catch (e: Exception) {
                 Log.e("MonitoringService", "Stop session failed", e)
             }
         }
-        sessionId = null
 
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -386,8 +398,11 @@ class MonitoringService : Service(), LifecycleOwner {
 
     private fun acquireWakeLock() {
         val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+        // 2 h upper bound. This is only a safety net in case both stopMonitoring() and
+        // onDestroy() fail to run (e.g. process death). Real sessions release the lock
+        // explicitly on Stop; a 10 h ceiling drained battery when that path was missed.
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "vigilia:monitoring").apply {
-            acquire(10 * 60 * 60 * 1000L)
+            acquire(2 * 60 * 60 * 1000L)
         }
     }
 
@@ -400,7 +415,6 @@ class MonitoringService : Service(), LifecycleOwner {
 
     private fun createNotificationChannel() {
         val channel = NotificationChannel(CHANNEL_ID, "Monitoramento", NotificationManager.IMPORTANCE_LOW)
-        val notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.createNotificationChannel(channel)
     }
 
@@ -419,7 +433,6 @@ class MonitoringService : Service(), LifecycleOwner {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) return
         }
-        val notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.notify(NOTIFICATION_ID, createNotification(content))
     }
 
