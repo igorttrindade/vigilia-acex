@@ -255,6 +255,9 @@ Sustained FATIGUED: re-alert after ALERT_COOLDOWN_MS = 8_000 ms.
 Return to NORMAL/NO_FACE from WARNING/FATIGUED: stopAlert().
 ```
 
+### Foreground notification
+Ongoing notification (channel `vigilia_monitoring`, IMPORTANCE_LOW) shows current fatigue state + score (or calibration progress). Tapping opens `MainActivity`; a **"Parar"** action button sends `ACTION_STOP` back to the service so the driver can stop monitoring without reopening the app — important because a foreground service of type `camera|location` correctly keeps running when the app is swiped away from recent apps. Without the notification action, the only way to stop was to reopen the app and press Stop. State labels in the notification are translated to PT-BR (`Normal`, `Atenção`, `Fadigado`, `Rosto não detectado`, `Calibrando`).
+
 ### Camera & analyzer threading
 - `analysisExecutor`: single-threaded `Executors.newSingleThreadExecutor()`.
 - MediaPipe init: `Handler(Looper.getMainLooper()).post { ... }` — required by MediaPipe.

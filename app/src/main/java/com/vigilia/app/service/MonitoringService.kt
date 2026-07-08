@@ -2,6 +2,7 @@ package com.vigilia.app.service
 
 import android.Manifest
 import android.app.Notification
+import android.app.PendingIntent
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -27,6 +28,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import com.google.android.gms.location.*
+import com.vigilia.app.MainActivity
 import com.vigilia.app.camera.CameraManager
 import com.vigilia.app.data.telemetry.TelemetryWriter
 import com.vigilia.app.domain.model.FatigueAssessment
@@ -277,7 +279,7 @@ class MonitoringService : Service(), LifecycleOwner {
     }
 
     private fun handleAssessment(assessment: FatigueAssessment, metrics: FatigueMetrics) {
-        updateNotification("Monitorando... Estado: ${assessment.fatigueState}")
+        updateNotification(assessment)
 
         val previousState = currentAssessment.value?.fatigueState ?: FatigueState.NORMAL
         val newState = assessment.fatigueState
@@ -469,21 +471,57 @@ class MonitoringService : Service(), LifecycleOwner {
     }
 
     private fun createNotification(content: String): Notification {
+        // Tap opens MainActivity; the "Parar" action stops monitoring without needing to
+        // reopen the app. Both PendingIntents use FLAG_IMMUTABLE (required from Android S)
+        // and FLAG_UPDATE_CURRENT so subsequent notification updates reuse the same slots.
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val openPending = PendingIntent.getActivity(
+            this, 0, openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val stopIntent = Intent(this, MonitoringService::class.java).apply { action = ACTION_STOP }
+        val stopPending = PendingIntent.getService(
+            this, 1, stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Vigília ativo")
             .setContentText(content)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
+            .setContentIntent(openPending)
+            .addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "Parar",
+                stopPending,
+            )
             .build()
     }
 
-    private fun updateNotification(content: String) {
+    private fun formatNotificationContent(assessment: FatigueAssessment): String {
+        val stateLabel = when (assessment.fatigueState) {
+            FatigueState.NORMAL -> "Normal"
+            FatigueState.WARNING -> "Atenção"
+            FatigueState.FATIGUED -> "Fadigado"
+            FatigueState.NO_FACE -> "Rosto não detectado"
+            FatigueState.CALIBRATING -> "Calibrando"
+        }
+        return if (assessment.fatigueState == FatigueState.CALIBRATING) {
+            "$stateLabel · ${(assessment.calibrationProgress * 100).toInt()}%"
+        } else {
+            "$stateLabel · Score ${assessment.score.toInt()}"
+        }
+    }
+
+    private fun updateNotification(assessment: FatigueAssessment) {
         if (!isProcessRunning) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) return
         }
-        notificationManager.notify(NOTIFICATION_ID, createNotification(content))
+        notificationManager.notify(NOTIFICATION_ID, createNotification(formatNotificationContent(assessment)))
     }
 
     override fun onDestroy() {
