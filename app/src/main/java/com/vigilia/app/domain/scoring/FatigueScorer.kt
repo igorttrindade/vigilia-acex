@@ -113,12 +113,15 @@ class FatigueScorer(
         // Calibration
         const val CALIBRATION_DURATION_MS = 7_000L
         const val CALIBRATION_MIN_SAMPLES = 20
-        // Was 0.60 — with baseline p90 ≈ 0.85, the calibrated eyeClosedThreshold came out at
-        // ~0.51, clamped by EYE_CLOSED_MAX = 0.60. Normally-open frames (openness 0.40–0.55)
-        // were classified as closed → PERCLOS inflated to 30–40 % steady state and false
-        // WARNINGs after ~30 s. Realigned with the PERCLOS-70 automotive standard: a frame
-        // counts as "closed" only when openness < 30 % of the calibrated open baseline.
-        const val EYE_CLOSED_RATIO = 0.40f   // was 0.60
+        // 0.60 → 0.40 → 0.30. Successive tightenings — the code always claimed alignment
+        // with the PERCLOS-70 automotive standard ("frame counts as closed when openness
+        // < 30 % of the calibrated open baseline") but the value 0.40 still meant 40 % of
+        // baseline. Field test with 0.40 showed post-calibration score ≈ 40 in wide-awake
+        // users because frames with openness 0.30-0.34 (screen focus, mild squint under
+        // artificial light) counted as closed against a p90 × 0.40 threshold ≈ 0.34. At
+        // 0.30 the threshold lands around 0.255 (with p90 ≈ 0.85) — only frames with real
+        // closure count, and baseline PERCLOS drops to the expected 5-15 % for alert users.
+        const val EYE_CLOSED_RATIO = 0.30f   // was 0.60, then 0.40
         // Was 0.15 — too permissive when calibration samples were noisy (dim light, subject
         // shifting). If p90 landed near 0.38, threshold pinned at 0.15 and frames with
         // openness 0.15-0.30 (still visibly open) counted as closed → PERCLOS baseline

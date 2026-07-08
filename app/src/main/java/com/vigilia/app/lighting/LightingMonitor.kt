@@ -99,7 +99,12 @@ class LightingMonitor {
         const val ENTER_LOW_LUX = 50f
 
         const val EXIT_DARK_Y = 45f      // was 55
-        const val EXIT_LOW_Y = 80f       // was 105
+        // Was 80 — too high for typical front-camera AE output in normally-lit indoor
+        // scenes (Y usually maxes at 70-75 with spot-metering on the face). LOW_LIGHT got
+        // stuck: entered legitimately when the room darkened, then the exit gate was
+        // unreachable when lights came back on. 70 gives 5 pt hysteresis with ENTER_LOW_Y=65
+        // — small window but the 3 s lighter dwell prevents flapping.
+        const val EXIT_LOW_Y = 70f       // was 105, then 80
         const val EXIT_DARK_LUX = 20f
         const val EXIT_LOW_LUX = 65f
 

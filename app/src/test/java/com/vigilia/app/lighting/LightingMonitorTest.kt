@@ -75,20 +75,21 @@ class LightingMonitorTest {
     }
 
     @Test
-    fun `exit from LOW_LIGHT to NORMAL requires plus 15 hysteresis`() {
+    fun `exit from LOW_LIGHT to NORMAL requires clearing the hysteresis band`() {
         // Get into LOW_LIGHT.
         monitor.update(null, 50f, tsMs = 0L)
         monitor.update(null, 50f, tsMs = 2100L)
         assertEquals(LightingMode.LOW_LIGHT, monitor.mode.value)
 
-        // Y=75 is above ENTER_LOW_Y=65 but below EXIT_LOW_Y=80 → still LOW_LIGHT (no target change).
-        monitor.update(null, 75f, tsMs = 3000L)
-        monitor.update(null, 75f, tsMs = 8000L)
+        // Y=68 is above ENTER_LOW_Y=65 but below EXIT_LOW_Y=70 → still LOW_LIGHT (in the
+        // hysteresis band, no target change).
+        monitor.update(null, 68f, tsMs = 3000L)
+        monitor.update(null, 68f, tsMs = 8000L)
         assertEquals(LightingMode.LOW_LIGHT, monitor.mode.value)
 
-        // Y=95 crosses EXIT_LOW_Y=80. Dwell lighter = 3000ms.
-        monitor.update(null, 95f, tsMs = 9000L)
-        monitor.update(null, 95f, tsMs = 12100L)
+        // Y=85 crosses EXIT_LOW_Y=70. Dwell lighter = 3000ms.
+        monitor.update(null, 85f, tsMs = 9000L)
+        monitor.update(null, 85f, tsMs = 12100L)
         assertEquals(LightingMode.NORMAL, monitor.mode.value)
     }
 
