@@ -429,16 +429,16 @@ class FatigueScorerTest {
         assertTrue("perclos should be close to 1 with sustained closed eyes (was ${closed.perclos})", closed.perclos > 0.9f)
         assertTrue("perclosContribution must be > 0", closed.perclosContribution > 0f)
         assertTrue("perclosContribution must not exceed weight", closed.perclosContribution <= 65f + 0.01f)
-        assertTrue("blinkContribution must not exceed weight", closed.blinkContribution <= 15f + 0.01f)
+        assertTrue("blinkContribution must not exceed weight", closed.blinkContribution <= 10f + 0.01f)
         assertTrue("blinkContribution must be >= 0", closed.blinkContribution >= 0f)
 
-        // With a yawn in progress, yawnContribution should be exactly 25 (or 0 if not yawning).
+        // With a yawn in progress, yawnContribution should be exactly SCORE_WEIGHT_YAWN (or 0 if not yawning).
         // Feed 20 frames of open mouth after warmup → confirms yawn on-off.
         t += 100
         repeat(20) { s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.8f, true, t)); t += 100 }
         val yawningAssessment = s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.8f, true, t))
         if (yawningAssessment.isYawning) {
-            assertEquals("yawnContribution must equal SCORE_WEIGHT_YAWN when yawning", 25f, yawningAssessment.yawnContribution, 0.01f)
+            assertEquals("yawnContribution must equal SCORE_WEIGHT_YAWN when yawning", 15f, yawningAssessment.yawnContribution, 0.01f)
         } else {
             assertEquals("yawnContribution must be 0 when not yawning", 0f, yawningAssessment.yawnContribution, 0.01f)
         }
@@ -519,6 +519,39 @@ class FatigueScorerTest {
             "Elevated but normal blink rate must not trigger WARNING (state=${finalAssessment.fatigueState}, score=${finalAssessment.score})",
             FatigueState.NORMAL,
             finalAssessment.fatigueState,
+        )
+    }
+
+    @Test
+    fun `single yawn from a WARNING baseline does not promote to FATIGUED`() {
+        // Regression for the reported issue: user parado no computador (baseline elevated
+        // enough to reach WARNING) yawned once and the app jumped to FATIGUED. With
+        // SCORE_WEIGHT_YAWN = 15 (was 25) and BLINK weight = 10 (was 15), the extra 15 pts
+        // from a yawn on top of a WARNING baseline (~50) tops out at ~65 — below the 70-pt
+        // FATIGUED threshold. Real fatigue (sustained PERCLOS + repeated yawns) still
+        // promotes and is covered by `WARNING to FATIGUED transition requires sustained score`.
+        var t = advanceToWarning(1000L)
+        // At this point score is just past 50 (WARNING gate) with PERCLOS ≈ 0.77.
+
+        // Simulate one yawn: 20 frames of mouth open (~2 s, above YAWN_DURATION_MS = 1.5 s).
+        // Eyes remain half-open (openness 0.35 — above default closed threshold 0.30) so
+        // PERCLOS starts to drain during the yawn instead of continuing to climb.
+        repeat(20) {
+            scorer.processFrame(FatigueMetrics(0.35f, 0.35f, 0.8f, true, t))
+            t += 100
+        }
+
+        // Then monitor for 6 s of continued mouth-open — long enough that if the
+        // WARNING → FATIGUED sustain (4 s) were to fire, it would fire in this window.
+        var reachedFatigued = false
+        repeat(60) {
+            val a = scorer.processFrame(FatigueMetrics(0.35f, 0.35f, 0.8f, true, t))
+            if (a.fatigueState == FatigueState.FATIGUED) reachedFatigued = true
+            t += 100
+        }
+        assertFalse(
+            "Single yawn on a WARNING baseline must not reach FATIGUED (yawn is tier-2 signal)",
+            reachedFatigued,
         )
     }
 

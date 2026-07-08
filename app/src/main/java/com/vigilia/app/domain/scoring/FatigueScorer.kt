@@ -32,7 +32,11 @@ class FatigueScorer(
         const val BLINK_WINDOW_MS = 60_000L
         const val YAWN_THRESHOLD_PROB = 0.38f
         const val YAWN_DURATION_MS = 1_500L
-        const val YAWN_RESET_MS = 5_000L
+        // Was 5_000L — kept isCurrentlyYawning true for 5 s after peak, adding a fixed
+        // 25-pt slug that alone could push score past the FATIGUED gate when combined with
+        // any elevated PERCLOS. Physical yawn is ~1.5-2 s; 3 s covers with margin and lets
+        // the contribution fade during recovery instead of pinning the score high.
+        const val YAWN_RESET_MS = 3_000L
         // Brief mouth-close tolerance: door not reset mid-yawn due to speaking/coughing frame
         const val YAWN_GRACE_MS = 300L
         const val SMOOTHING_ALPHA = 0.3f
@@ -41,14 +45,17 @@ class FatigueScorer(
         const val EYE_CLOSED_THRESHOLD_DEFAULT = 0.3f
         const val EYE_OPEN_THRESHOLD_DEFAULT = 0.4f
 
-        // PERCLOS is the primary fatigue signal (weight 65). Total sums to 105 (clamped
+        // PERCLOS is the primary fatigue signal (weight 65). Total sums to 90 (clamped
         // to 100) so a *combination* is required to reach FATIGUED (>70), not any single
-        // signal alone. BLINK was 20 — a moderately high rate (25/min under focus / dry
-        // eyes) hit the max deviation and drove score into WARNING alongside PERCLOS.
-        // Lowered to 15 so blink is still a real signal but not a sole tipping factor.
+        // signal alone. Blink was 20 → 15 → 10: focus-blink at the phone camera runs
+        // 25-30/min naturally, driving the deviation to ~1.0 (10 pts) even for wide-awake
+        // users; keeping blink at 15 pushed the baseline near WARNING when combined with
+        // mild PERCLOS. Yawn was 25 → 15: a single yawn is a tier-2 signal in the
+        // automotive literature and should not promote to FATIGUED on its own — real
+        // fatigue is detected by PERCLOS+yawn in combination.
         const val SCORE_WEIGHT_PERCLOS = 65f
-        const val SCORE_WEIGHT_BLINK = 15f
-        const val SCORE_WEIGHT_YAWN = 25f
+        const val SCORE_WEIGHT_BLINK = 10f
+        const val SCORE_WEIGHT_YAWN = 15f
 
         // The "healthy" blink range was 15-20/min from PERCLOS literature, but that
         // literature assumes drivers looking at the road, not at a phone camera. Users
@@ -79,7 +86,11 @@ class FatigueScorer(
         const val TRANSITION_WARNING_TO_NORMAL_SCORE = 30f
         const val TRANSITION_WARNING_TO_NORMAL_MS = 5_000L
         const val TRANSITION_FATIGUED_TO_WARNING_SCORE = 50f
-        const val TRANSITION_FATIGUED_TO_WARNING_MS = 5_000L
+        // Was 5_000L — asymmetric with the upgrade gate (4 s). Reduced to 3 s so a driver
+        // who has clearly recovered isn't held in the alarm state longer than needed. Still
+        // filters transient dips: score must sit under 50 for 3 s of real time, which the
+        // exponential smoothing (α=0.3) prevents from happening on any brief drop.
+        const val TRANSITION_FATIGUED_TO_WARNING_MS = 3_000L
 
         // Cap on per-frame delta added to the transition accumulator. Prevents brief
         // excursions into the neutral score band from resetting recovery progress
@@ -101,7 +112,12 @@ class FatigueScorer(
         // WARNINGs after ~30 s. Realigned with the PERCLOS-70 automotive standard: a frame
         // counts as "closed" only when openness < 30 % of the calibrated open baseline.
         const val EYE_CLOSED_RATIO = 0.40f   // was 0.60
-        const val EYE_CLOSED_MIN = 0.15f
+        // Was 0.15 — too permissive when calibration samples were noisy (dim light, subject
+        // shifting). If p90 landed near 0.38, threshold pinned at 0.15 and frames with
+        // openness 0.15-0.30 (still visibly open) counted as closed → PERCLOS baseline
+        // inflated. 0.18 gives calibration a slightly stricter floor while still fitting
+        // narrow-eyed users (p90 ≈ 0.45 → threshold = 0.18, exactly at the floor).
+        const val EYE_CLOSED_MIN = 0.18f
         const val EYE_CLOSED_MAX = 0.45f     // was 0.60
         // Require a consecutive run of well-framed, eyes-open frames before calibration
         // starts collecting samples. Guards against sampling the user immediately after

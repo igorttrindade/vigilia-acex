@@ -100,14 +100,14 @@ Constants live in the `companion object` of `FatigueScorer`. **These are the val
 |---|---|---|
 | PERCLOS | **30 000 ms** | % of eye-closed frames — primary fatigue signal |
 | Blink   | **60 000 ms** | Rolling blink count for rate deviation |
-| Yawn    | ≥ 1 500 ms sustained open + 5 000 ms cooldown | Secondary fatigue signal |
+| Yawn    | ≥ 1 500 ms sustained open + 3 000 ms cooldown | Secondary fatigue signal |
 
-### Score weights (sum = 105, clamped to 0–100)
+### Score weights (sum = 90, clamped to 0–100)
 - `SCORE_WEIGHT_PERCLOS = 65f`
-- `SCORE_WEIGHT_BLINK = 15f`
-- `SCORE_WEIGHT_YAWN = 25f`
+- `SCORE_WEIGHT_BLINK = 10f`
+- `SCORE_WEIGHT_YAWN = 15f`
 
-**Design decision**: total weight slightly exceeds 100 on purpose. It preserves headroom so PERCLOS alone (worst case = 65) sits below the FATIGUED threshold (70) — FATIGUED requires a *combination* of PERCLOS + blink deviation + yawn, not any single signal. `SCORE_WEIGHT_BLINK` was lowered from 20 to 15 so a moderately high blink rate (under focus / dry eyes / stress) can't sit right at the WARNING threshold on its own.
+**Design decision**: total weight is intentionally under 100 to preserve the invariant that FATIGUED (>70) requires a *combination* of signals, not any single one. PERCLOS alone maxes at 65 (below 70). Blink weight was lowered from 20 → 15 → 10 across successive tunings — focus-blink at the front camera runs 25-30/min naturally, keeping deviation near 1.0, so any higher weight pushes the baseline near WARNING for wide-awake users. Yawn weight was lowered from 25 → 15 because a single yawn (tier-2 signal in the automotive literature) was tipping stationary users into FATIGUED when combined with mild PERCLOS.
 
 Exponential smoothing: `smoothedScore = 0.3 * rawScore + 0.7 * prev` (`SMOOTHING_ALPHA = 0.3`).
 
@@ -117,19 +117,19 @@ Exponential smoothing: `smoothedScore = 0.3 * rawScore + 0.7 * prev` (`SMOOTHING
 | NORMAL   | WARNING  | > 50 | 3 000 ms |
 | WARNING  | FATIGUED | > 70 | 4 000 ms |
 | WARNING  | NORMAL   | < 30 | 5 000 ms |
-| FATIGUED | WARNING  | < 50 | 5 000 ms |
+| FATIGUED | WARNING  | < 50 | 3 000 ms |
 
 `TRANSITION_MAX_FRAME_DELTA_MS = 200` caps per-frame delta added to the transition accumulator — brief excursions into the neutral band don't reset progress.
 
 ### Eye-closed threshold
 - Default `EYE_CLOSED_THRESHOLD_DEFAULT = 0.30f`.
-- After calibration, replaced by `baseline * 0.40f` clamped to `[0.15, 0.45]` where `baseline` is the p90 of collected openness samples. This is the **PERCLOS-70 automotive standard** — a frame counts as "closed" only when the eye is at less than 30 % of its calibrated open baseline. A previous iteration used `0.60 * baseline` (clamped 0.15..0.60), which pushed the threshold to ~0.51 with a normal user, misclassifying open frames as closed and inflating PERCLOS steady-state to 30-40 %.
+- After calibration, replaced by `baseline * 0.40f` clamped to `[0.18, 0.45]` where `baseline` is the p90 of collected openness samples. This is the **PERCLOS-70 automotive standard** — a frame counts as "closed" only when the eye is at less than 30 % of its calibrated open baseline. A previous iteration used `0.60 * baseline` (clamped 0.15..0.60), which pushed the threshold to ~0.51 with a normal user, misclassifying open frames as closed and inflating PERCLOS steady-state to 30-40 %. The lower bound was later raised from 0.15 to 0.18 because noisy calibrations (dim light, subject shifting) could land the p90 near 0.38, pinning the threshold at 0.15 and counting openness 0.15-0.30 frames as closed — inflating PERCLOS baseline in normal use.
 
 ### Calibration (up to 10 s total: ≤ 3 s gate + 7 s collection)
 - `calibrationEnabled` is a `Boolean` passed to the scorer constructor (default `true`).
 - **Stabilization gate (≤ 3 s)**: waits for `CALIBRATION_STABILIZATION_MS = 800L` of frames with `eyeOpenness ≥ 0.35`. Tolerates up to `CALIBRATION_STABILIZATION_TOLERANCE_FRAMES = 3` consecutive frames below the threshold (≈ 1 natural blink at 30 fps) without resetting the timer. If the gate hasn't converged after `CALIBRATION_STABILIZATION_MAX_MS = 3 000L`, sample collection **force-starts** with a warning log — the p90 during collection is robust to residual noise.
 - **Sample collection (7 s)**: `CALIBRATION_DURATION_MS = 7 000L`, min `CALIBRATION_MIN_SAMPLES = 20` — otherwise defaults are kept.
-- `eyeClosedThreshold = p90(samples) * 0.60` clamped to `[0.15, 0.60]`.
+- `eyeClosedThreshold = p90(samples) * 0.40` clamped to `[0.18, 0.45]`.
 - `eyeOpenThreshold = eyeClosedThreshold + 0.10` (clamped so it stays above closed).
 - **Post-calibration seeding**: when collection finishes, `perclosWindow` is pre-populated with the ~210 calibration samples re-evaluated against the just-computed `eyeClosedThreshold`, and `monitoringStartMs` is anchored at the start of collection (so the 30 s blink warmup ticks in parallel with calibration). Without the seed, the buffer starts empty right when state flips to NORMAL — a single natural blink then made PERCLOS jump to ~80 % (5 closed frames out of 6 total) and the score spiked. This eliminates the "score já está alto quando termina a calibração" transient.
 - **Rationale for the gate**: without it, sampling started on the very first frame after Start — while the user's finger was still leaving the toggle button — dragging the baseline down and producing an inflated `eyeClosedThreshold` (commit `0faa6a5`). **Rationale for the tolerance + hard cap**: an earlier version required 1.5 s of unbroken good frames with `openness ≥ 0.5` and reset the timer on any low frame. Natural blinks reset it every 3-4 s, so calibration could take 15-60 s or never start with glasses/harsh lighting. The tolerance absorbs one blink, the hard cap guarantees calibration always finishes within 10 s.
@@ -393,7 +393,7 @@ All tuning constants are in `FatigueScorer.kt`'s `companion object`. Common twea
 - Increase `TRANSITION_NORMAL_TO_WARNING_MS` (currently 3000) to be less trigger-happy on WARNING.
 - Increase `LOOK_AWAY_YAW_DEGREES` (currently 25) if drivers legitimately turn further while still monitoring the phone camera.
 - Increase `CALIBRATION_STABILIZATION_MS` (currently 800) if devices with fast MediaPipe init still catch too-early samples.
-- Note the score weights sum to 105 — this is intentional (see "Score weights").
+- Note the score weights sum to 90 — this is intentional (see "Score weights"). Under 100 means the score never saturates from any two-signal combination alone, preserving the "FATIGUED requires PERCLOS + at least one secondary" invariant.
 - To retune Fase-1 lighting behavior, edit constants in `LightingMonitor.companion object` (thresholds, dwell) and `FaceAnalyzer.companion object` (`GAMMA_LOW_LIGHT`, `GAMMA_DARK`, `CLAHE_CLIP_LIMIT`, `CLAHE_TILE_SIZE`). Camera2 knobs live in `CameraManager.applyLightingMode`.
 
 ## Debug telemetry
@@ -447,3 +447,4 @@ adb shell dumpsys power | grep vigilia
 - **Seed `perclosWindow` from calibration samples at the end of the collection phase** — otherwise the buffer is empty at the exact moment state flips to NORMAL, and a single natural blink (5 closed frames in a buffer of ~6) inflates PERCLOS to ~80 %, spiking the score right after calibration. `calibrationSamples` was extended to `MutableList<Pair<Long, Float>>` (timestamp + openness) so the samples can be re-evaluated against the newly-computed threshold and pushed into the window. `monitoringStartMs` is also anchored at the start of the collection phase so blink warmup runs in parallel with calibration.
 - **PERCLOS-70 realignment + sub-score telemetry**: `EYE_CLOSED_RATIO` dropped from 0.60 to 0.40, `EYE_CLOSED_MAX` from 0.60 to 0.45, `SCORE_WEIGHT_BLINK` from 20 to 15, `TRANSITION_WARNING_TO_NORMAL_SCORE` from 25 to 30. Before this the calibrated eye-closed threshold sat around 0.51, so normally-open frames were counted as closed → PERCLOS baseline was ~30 % (should be ~5 %), score got stuck around 26-30, and recovery from WARNING to NORMAL never converged (25 threshold unreachable). Also added four sub-score columns to `session.csv` (`perclos`, `perclosContribution`, `blinkContribution`, `yawnContribution`) and mirror fields in `FatigueAssessment` / `TelemetryRecord` / `TelemetryRecordDto` so future weight tuning can be data-driven instead of guesswork.
 - **Fase 1 — lighting adaptation subsystem**: added `LightingMonitor` (NORMAL/LOW_LIGHT/DARK FSM with +15 hysteresis and asymmetric dwell 2 s darker / 3 s lighter), driven by mean Y-luminance of each frame plus optional `TYPE_LIGHT` lux. Feeds three consumers: (1) `FaceAnalyzer` applies OpenCV CLAHE (`clipLimit=2.0`, tile `8×8`) + gamma LUT (`γ=1.2` LOW_LIGHT, `γ=1.4` DARK) on Y, with reusable Mats keeping cost around ~10 ms/frame; (2) `CameraManager.applyLightingMode` hot-applies EV compensation (+1/+2 EV nudges), target FPS ranges (24-30 → 20-30 → 15-20), and `CONTROL_SCENE_MODE_NIGHT` via `Camera2CameraControl`; (3) `FatigueScorer` widens `NO_FACE_GRACE_MS` from 500 ms → 1500 ms in DARK so headlight-induced detection drops don't clear buffers. Motivation: night driving and tunnels caused runs of failed frames where PERCLOS/blink windows kept resetting, and blendshapes got noisy from low contrast. `SetupScreen` gates the whole subsystem via a `lastLowLightAdaptationEnabled` toggle (default on, persisted). Three new telemetry columns (`ambient_light_lux`, `frame_luminance`, `lighting_mode`) added to `session.csv`, `TelemetryRecordDto`, and the Supabase `telemetry_records` table (schema migration applied manually in the dashboard). OpenCV 4.11.0 added as a dependency; load failures degrade silently to raw frames.
+- **Tuning: reduce false positives for stationary users and speed up FATIGUED recovery**: after field testing, a user sitting still at a computer (no glasses, calibration on) reached WARNING from baseline signal, then a single yawn tipped him into FATIGUED — with recovery taking 15-30 s. Five constant changes: `SCORE_WEIGHT_BLINK` 15 → 10 (focus-blink at the phone camera drives deviation near 1.0 for wide-awake users, keeping high weight pushed the baseline near WARNING); `SCORE_WEIGHT_YAWN` 25 → 15 (yawn is tier-2 in the automotive literature — should not promote to FATIGUED unilaterally); `YAWN_RESET_MS` 5 000 → 3 000 (physical yawn is 1.5-2 s, the 5 s state extension pinned the score high during recovery); `TRANSITION_FATIGUED_TO_WARNING_MS` 5 000 → 3 000 (asymmetric with the 4 s upgrade gate was unjustified); `EYE_CLOSED_MIN` 0.15 → 0.18 (noisy calibrations could pin the threshold at 0.15 and misclassify half-open frames as closed). Weight sum drops from 105 to 90, preserving the "no single signal reaches FATIGUED" invariant with a bit more headroom. Real fatigue detection (sustained PERCLOS ≥ 50 % with corroborating signals) is unchanged and covered by the existing `WARNING to FATIGUED transition` test. New regression test `single yawn from a WARNING baseline does not promote to FATIGUED` guards the specific scenario reported.
