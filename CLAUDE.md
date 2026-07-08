@@ -48,18 +48,22 @@ UI (Jetpack Compose, Navigation)
 
 Service Layer
 ├── MonitoringService (Foreground Service, camera|location)
-│   ├── CameraManager + CameraX
-│   ├── FaceAnalyzer (MediaPipe Face Landmarker)
+│   ├── CameraManager + CameraX (Camera2Interop tuning per lighting mode)
+│   ├── FaceAnalyzer (MediaPipe Face Landmarker + OpenCV CLAHE)
 │   ├── FatigueScorer
+│   ├── LightingMonitor (Y-luminance + optional TYPE_LIGHT lux → mode FSM)
 │   ├── TelemetryWriter
 │   ├── FusedLocationProviderClient (GPS)
-│   └── SensorManager (accel + gyro)
-├── ServiceController (start/stop + last calibration preference)
+│   └── SensorManager (accel + gyro + light)
+├── ServiceController (start/stop + calibration & low-light-adaptation preferences)
 └── SyncWorker (CoroutineWorker via WorkManager)
 
 Domain
-├── FatigueScorer (PERCLOS + blinks + yawns + hysteresis FSM + calibration)
+├── FatigueScorer (PERCLOS + blinks + yawns + hysteresis FSM + calibration + dark-mode grace)
 └── FatigueModels (FatigueMetrics, FatigueAssessment, SessionSummary, TelemetryRecord, FatigueState)
+
+Lighting (Fase 1)
+└── LightingMonitor + LightingMode enum (NORMAL / LOW_LIGHT / DARK)
 
 Data
 ├── TelemetryWriter (local CSV/JSON, writeMutex)
@@ -74,17 +78,18 @@ Remote
 
 ## Real-time monitoring pipeline
 
-1. **Camera capture**: CameraX (front) → ImageAnalysis 640×480 (via `ResolutionSelector` with `FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER`) → single-threaded `analysisExecutor` with `STRATEGY_KEEP_ONLY_LATEST` backpressure.
-2. **Face detection**: `FaceAnalyzer` runs MediaPipe FaceLandmarker (asset `face_landmarker.task`) with `setOutputFaceBlendshapes(true)` and `setOutputFacialTransformationMatrixes(true)`. Model init is scheduled on the Main Looper (MediaPipe requires it) — early frames return NO_FACE until the model is ready.
-3. **Per-frame extraction**:
+1. **Camera capture**: CameraX (front) → ImageAnalysis 640×480 (via `ResolutionSelector` with `FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER`) → single-threaded `analysisExecutor` with `STRATEGY_KEEP_ONLY_LATEST` backpressure. EV compensation, target FPS range, and `CONTROL_SCENE_MODE_NIGHT` are hot-applied per `LightingMode` via `Camera2CameraControl.setCaptureRequestOptions` — see "Lighting adaptation".
+2. **Lighting classification**: for each frame, `FaceAnalyzer.computeYPlaneMean` samples an 8×8 grid over the Y plane (~0.3 ms) → `LightingMonitor.update(lux, frameLuminance, tsMs)` runs the hysteretic FSM and emits the current mode. Modes drive both preprocessing (CLAHE + gamma) and scorer behavior (wider `NO_FACE_GRACE_MS_DARK` in DARK).
+3. **Face detection**: `FaceAnalyzer` runs MediaPipe FaceLandmarker (asset `face_landmarker.task`) with `setOutputFaceBlendshapes(true)` and `setOutputFacialTransformationMatrixes(true)`. In LOW_LIGHT/DARK, the frame is preprocessed with OpenCV CLAHE + gamma LUT (Y channel) before landmarking. Model init is scheduled on the Main Looper (MediaPipe requires it) — early frames return NO_FACE until the model is ready.
+4. **Per-frame extraction**:
    - `eyeBlinkLeft` / `eyeBlinkRight` blendshapes (0=open, 1=closed) → inverted to give openness probability.
    - `jawOpen` blendshape → mouth-open probability (not "smiling proxy" — real mouth openness).
    - EAR (Eye Aspect Ratio) computed geometrically from landmarks 33/133/159/145 (left) and 263/362/386/374 (right) — invariant to lens reflections from glasses; `min(blendshape, EAR)` is used so reflections cannot hide a blink.
    - Head yaw and pitch decomposed from the 4×4 facial transformation matrix (column-major, Y-X-Z Euler: `pitch=asin(-m[9])`, `yaw=atan2(m[8], m[10])`).
-4. **`FatigueMetrics`** is emitted for every frame (leftEyeOpen, rightEyeOpen, mouthOpen, isFaceDetected, timestamp, headYawDegrees, headPitchDegrees).
-5. **Scoring** (`FatigueScorer.processFrame`) — see next section.
-6. **Alerts** (Ringtone, USAGE_ALARM, 3s clip, 8s cooldown for sustained FATIGUED).
-7. **Telemetry** — every 2 s writes an 18-column record to `session.csv`; on Stop, `session_summary.json` is generated.
+5. **`FatigueMetrics`** is emitted for every frame (leftEyeOpen, rightEyeOpen, mouthOpen, isFaceDetected, timestamp, headYawDegrees, headPitchDegrees, frameLuminance).
+6. **Scoring** (`FatigueScorer.processFrame`) — see next section. The scorer reads the current `LightingMode` via a provider lambda and echoes `ambientLightLux` + `lightingMode` into `FatigueAssessment` for telemetry.
+7. **Alerts** (Ringtone, USAGE_ALARM, 3s clip, 8s cooldown for sustained FATIGUED).
+8. **Telemetry** — every 2 s writes a 25-column record to `session.csv`; on Stop, `session_summary.json` is generated.
 
 ## FatigueScorer — algorithm details
 
@@ -140,24 +145,98 @@ While `isLookingAway` is true: `perclosWindow` doesn't receive `addLast()`; blin
 ### NO_FACE handling
 `NO_FACE_GRACE_MS = 500L` absorbs single-frame detection glitches. After 500 ms of `isFaceDetected=false`, transition to NO_FACE and clear `perclosWindow`, `blinkTimestamps`, `smoothedScore`, and `calibrationEligibleSinceMs` so stale detection doesn't inflate the score when the face returns.
 
+**In DARK lighting mode the grace is widened to `NO_FACE_GRACE_MS_DARK = 1_500L`** — MediaPipe drops detection more frequently under low light, and a headlight glare followed by 2-3 failed frames must not clear the buffers. The active grace is chosen per-frame via `currentNoFaceGraceMs()` which reads the `lightingModeProvider`.
+
 ### Blink detection specifics
 - `BLINK_MIN_CLOSED_FRAMES = 3` — debounce for confirming a closure.
 - `BLINK_MAX_DURATION_MS = 500L` — closure beyond this counts as PERCLOS, not a blink.
 - `BLINK_MIN_OBSERVATION_MS = 30 000L` — first 30 s don't penalize low blink rate (avoids spurious inflation before enough data is collected).
 - Rate deviation: healthy range `[15, 24]` blinks / 60 s; penalty scales linearly to the limits `[8, 32]`. The upper bound was widened from 20 → 24 because users focused on the front-camera app blink 20-26/min naturally (focus, dry eyes, lighting), which the original PERCLOS-literature range interpreted as pathological.
 
+## Lighting adaptation (Fase 1)
+
+Cabin lighting varies wildly (tunnels, night driving, oncoming headlights). Without adaptation, MediaPipe drops face detection in low-light rushes, blendshapes get noisy, and the `NO_FACE_GRACE_MS = 500` grace clears PERCLOS/blink buffers on every glare. Fase 1 gives the pipeline explicit awareness of the current lighting condition and reacts on four fronts: preprocessing, camera hardware, scorer grace, and telemetry.
+
+### `LightingMonitor` — 3-state FSM
+Module: `app/src/main/java/com/vigilia/app/lighting/LightingMonitor.kt`.
+
+Modes: **NORMAL → LOW_LIGHT → DARK**. Two input signals per call to `update(lux, frameLuminance, tsMs)`:
+- **Y-luminance**: mean of an 8×8 grid over the Y plane (0..255), computed in `FaceAnalyzer.computeYPlaneMean` (~0.3 ms/frame).
+- **Ambient lux** (optional): `SensorManager` `TYPE_LIGHT`. Devices without the sensor pass `null` and the classifier still works from Y alone.
+
+Entry thresholds (either Y or lux triggers):
+- `ENTER_DARK_Y = 40f`, `ENTER_DARK_LUX = 5f`
+- `ENTER_LOW_Y = 90f`, `ENTER_LOW_LUX = 50f`
+
+Exit thresholds (+15 hysteresis on Y, +15 on lux — Y must clear the *higher* value to leave a mode):
+- `EXIT_DARK_Y = 55f`, `EXIT_DARK_LUX = 20f`
+- `EXIT_LOW_Y = 105f`, `EXIT_LOW_LUX = 65f`
+
+**Dwell**: a candidate mode change must persist for a direction-dependent window before it commits — `DWELL_MS_DARKER = 2_000L` when moving toward DARK, `DWELL_MS_LIGHTER = 3_000L` when moving back to lighter. Slower recovery is intentional: erring on "stay adapted a bit longer" is safe; premature return to NORMAL degrades detection.
+
+Emits `StateFlow<LightingMode>` — `MonitoringService` and `CameraManager` react without touching the frame loop.
+
+### Preprocessing in `FaceAnalyzer` — CLAHE + gamma
+When `shouldApplyClahe(mode)` is true (i.e. mode ≠ NORMAL) **and** OpenCV loaded successfully at init, each frame is enhanced before landmarking:
+
+1. `Utils.bitmapToMat` → `cvtColor(RGBA2YUV)` → `Core.split` to isolate the Y channel.
+2. **CLAHE** on Y (`clipLimit = 2.0`, tile `8×8`) — local histogram equalization; clip limit prevents amplifying sensor noise in DARK.
+3. **Gamma LUT** on Y (`γ_LOW_LIGHT = 1.2`, `γ_DARK = 1.4`) — pre-built via `buildGammaLut()` as a `Mat(1, 256, CV_8U)` and applied with `Core.LUT` (O(pixels)).
+4. `Core.merge` → `cvtColor(YUV2RGBA)` → `matToBitmap`.
+
+**Reused `Mat` optimization**: `bgrMat`, `yuvMat`, `yuvChannels`, both LUTs, and the CLAHE object are all allocated once per analyzer (`by lazy`) and reused per frame. Cuts enhancement cost from ~25 ms (fresh alloc) to ~10 ms. Safe because the analysis executor is single-threaded.
+
+**Fallback safety**: `OpenCVLoader.initLocal()` runs in a `try/catch`; on failure `opencvReady = false` and enhancement is silently skipped — the app behaves identically to pre-Fase-1.
+
+### Camera hardware tuning — `CameraManager.applyLightingMode(mode)`
+Runs on the Main executor when the `LightingMonitor` emits a mode change. Best-effort — devices that don't support a knob just fall back to their default.
+
+| Knob | NORMAL | LOW_LIGHT | DARK |
+|---|---|---|---|
+| Exposure compensation | 0 | ~+1 EV (`range.upper/3`) | ~+2 EV (`range.upper*2/3`) |
+| `CONTROL_AE_TARGET_FPS_RANGE` | 24–30 | 20–30 | 15–20 |
+| `CONTROL_SCENE_MODE` | DISABLED | NIGHT | NIGHT |
+
+FPS is dropped in DARK to leave the AE headroom for longer per-frame exposures. Applied via `Camera2CameraControl.from(cam.cameraControl).captureRequestOptions = ...`. If the camera isn't bound yet, `currentLightingMode` is remembered and reapplied after `bindToLifecycle` (also after `updatePreview`, which resets the `CaptureSession`).
+
+`currentLightingMode` is `@Volatile` — written from Main, read from the analysis executor via the getter passed to `FaceAnalyzer`.
+
+### Scorer grace override
+`FatigueScorer` constructor takes two optional providers:
+```kotlin
+lightingModeProvider: () -> LightingMode = { LightingMode.NORMAL },
+ambientLuxProvider:  () -> Float?      = { null },
+```
+Neither influences the algorithm's math — the mode is used only to swap `NO_FACE_GRACE_MS` for `NO_FACE_GRACE_MS_DARK` in DARK. Both values are echoed into `FatigueAssessment` for telemetry.
+
+### User gate — SetupScreen toggle
+`ServiceController.lastLowLightAdaptationEnabled` (default `true`, persisted across Start/Stop cycles) drives the `EXTRA_LOW_LIGHT_ADAPTATION_ENABLED` intent extra. When **false**:
+- `LightingMonitor` still classifies every frame (so telemetry captures the ambient condition for post-hoc analysis in Supabase).
+- `MonitoringService` skips the `lightingMonitor.mode.collect { cameraManager.applyLightingMode(...) }` coroutine — no Camera2 tuning.
+- CLAHE preprocessing is still gated by `shouldApplyClahe(mode)` — since the mode still changes, preprocessing still runs. If a user needs *zero* Fase-1 side effects, this is a known limitation (tracked but not fixed).
+
+### Telemetry
+Three new fields flow through `FatigueMetrics` → `FatigueAssessment` → `TelemetryRecord` → CSV → `TelemetryRecordDto` → Supabase `telemetry_records`:
+- `ambientLightLux: Float?` (from TYPE_LIGHT, may be null)
+- `frameLuminance: Float` (0..255, from computeYPlaneMean)
+- `lightingMode: String` ("NORMAL" | "LOW_LIGHT" | "DARK")
+
+Supabase columns `ambient_light_lux`, `frame_luminance`, `lighting_mode` exist on `telemetry_records` (schema migration done manually in the Supabase dashboard).
+
 ## Session lifecycle & threading
 
 ### MonitoringService
 
-- **Foreground service type**: `camera|location`. Started via `ServiceController.startMonitoring(context, calibrationEnabled: Boolean? = null)`. The `null` default reuses the last preference stored in `ServiceController.lastCalibrationEnabled` (initialized to `true`).
+- **Foreground service type**: `camera|location`. Started via `ServiceController.startMonitoring(context, calibrationEnabled: Boolean? = null, lowLightAdaptationEnabled: Boolean? = null)`. Both `null` defaults reuse the last preferences stored in `ServiceController.lastCalibrationEnabled` and `ServiceController.lastLowLightAdaptationEnabled` (both initialized to `true`).
 - **Bound by `MonitoringScreen`** with `BIND_AUTO_CREATE` while the screen is composed — this is why `onDestroy()` doesn't fire between Start/Stop cycles on that screen. All lifecycle-critical cleanup runs in `stopMonitoring()` explicitly, with `onDestroy()` as a fallback.
 - **`currentAssessment: MutableStateFlow<FatigueAssessment?>`** lives on the companion object — the single source of truth consumed by every UI collector.
 
 ### `startMonitoring()`
-1. Recreate `scorer = FatigueScorer(calibrationEnabled)` from scratch.
-2. `startForeground()`, `startLocationUpdates()`, `startSensorUpdates()`.
+1. Recreate `scorer = FatigueScorer(calibrationEnabled, lightingModeProvider = { lightingMonitor.mode.value }, ambientLuxProvider = { lastAmbientLux })` from scratch. `lightingMonitor.reset()`.
+2. `startForeground()`, `startLocationUpdates()`, `startSensorUpdates()` (registers accel, gyro, and `TYPE_LIGHT` when available).
 3. Launch on Main: `acquireWakeLock()` (2 h ceiling, safety only — released on Stop), preload ringtone, `telemetryWriter.startSession()` (guard-rail finalizes any orphaned previous session), set `isProcessRunning = true`, `cameraManager.startCamera(...)`.
+4. Inside the frame callback, before `scorer.processFrame(metrics)`: `lightingMonitor.update(lastAmbientLux, metrics.frameLuminance, metrics.timestampMs)`.
+5. If `lowLightAdaptationEnabled`, launch a `serviceScope` collector on `lightingMonitor.mode` that calls `cameraManager.applyLightingMode(mode)` on transitions (off the frame loop; cancelled on stop).
 
 ### `stopMonitoring()` (async — no `runBlocking`)
 1. `isProcessRunning = false` (frame callback returns early after this).
@@ -184,7 +263,7 @@ Return to NORMAL/NO_FACE from WARNING/FATIGUED: stopAlert().
 Session directory: `context.filesDir/sessions/{sessionId}/`
 
 Files:
-- `session.csv` — one row per 2 s window (22 columns): `sessionId,timestamp,score,state,eyeOpenness,blinkRate,isYawning,isFaceDetected,alertActive,latitude,longitude,speed,accelX,accelY,accelZ,gyroX,gyroY,gyroZ,perclos,perclosContribution,blinkContribution,yawnContribution`. The last four columns are FatigueScorer sub-scores exposed for post-hoc diagnosis — they let you decompose the aggregated `score` and calibrate weights from real data. Old CSVs (18 columns from earlier sessions) are still parseable by `SyncRepository.parseCsvLine`; the new columns just come back as null.
+- `session.csv` — one row per 2 s window (25 columns): `sessionId,timestamp,score,state,eyeOpenness,blinkRate,isYawning,isFaceDetected,alertActive,latitude,longitude,speed,accelX,accelY,accelZ,gyroX,gyroY,gyroZ,perclos,perclosContribution,blinkContribution,yawnContribution,ambientLightLux,frameLuminance,lightingMode`. Columns 19–22 are FatigueScorer sub-scores exposed for post-hoc diagnosis — they let you decompose the aggregated `score` and calibrate weights from real data. Columns 23–25 are the Fase-1 lighting context (see "Lighting adaptation"). Old CSVs (18 columns from pre-sub-score sessions, 22 columns from pre-Fase-1 sessions) are still parseable by `SyncRepository.parseCsvLine`; missing columns just come back as null.
 - `session_summary.json` — aggregated: `sessionId, startTime, endTime, durationMs, totalAlerts, dominantState, averageScore, peakScore`
 - `.synced` — empty marker written by `SyncRepository` after successful upload to Supabase
 
@@ -200,7 +279,7 @@ Files:
   - Walks `filesDir/sessions/*` looking for folders without `.synced`.
   - Parses `session_summary.json` → `SessionSummaryDto` → upsert `sessions`.
   - Streams `session.csv` line by line → `TelemetryRecordDto` batches of 100 → upsert `telemetry_records`.
-  - CSV parser validates `p.size >= 9` before indexing and uses `?.toDoubleOrNull()` / `?.toFloatOrNull()` for optional columns [9..17].
+  - CSV parser validates `p.size >= 9` before indexing and uses `?.toDoubleOrNull()` / `?.toFloatOrNull()` for optional columns [9..17]; sub-scores [18..21] and lighting fields [22..24] use `if (p.size > N) p[N].toFloatOrNull() else null` guards so older CSV formats parse cleanly.
   - Writes `.synced` on success. `SyncWorker.enqueue(context)` is called from `MonitoringService.onDestroy()`.
 
 ## UI
@@ -217,8 +296,8 @@ Files:
 - **AuthScreen**: sign-in / sign-up toggle. Uses `android.util.Patterns.EMAIL_ADDRESS`; password ≥ 8 chars. Errors mapped to PT-BR messages ("E-mail ou senha incorretos", "Confirme seu e-mail antes de entrar", etc.). Sign-up creates a `profiles` row via `ProfileDto` upsert.
 - **ForgotPasswordScreen**: sends reset email via Supabase, shows confirmation state.
 - **ResetPasswordScreen**: reached via deep link; calls `AuthRepository.updatePassword`.
-- **SetupScreen**: CAMERA and location permission launcher (`ActivityResultContracts.RequestMultiplePermissions`). Calibration toggle (persisted through `ServiceController`). Start button enabled iff CAMERA granted. Logout via `AuthViewModel.signOut`.
-- **MonitoringScreen**: `AndroidView { PreviewView }` inside `Box`. `ServiceConnection` binds to `MonitoringService` to `attachPreview`/`detachPreview`. Toggle button start/stop calls `viewModel.startMonitoring/stopMonitoring`. Overlays: state pill, radial score gauge, calibration progress bar, positioning warning banner. `MonitoringViewModel` maintains `frameWindow` (rolling 60 s of face-detected flags) to trigger a "reposicione o rosto" warning when > 30 % of frames are NO_FACE.
+- **SetupScreen**: CAMERA and location permission launcher (`ActivityResultContracts.RequestMultiplePermissions`). Two toggles persisted through `ServiceController`: calibration and low-light adaptation. Start button enabled iff CAMERA granted. Logout via `AuthViewModel.signOut`.
+- **MonitoringScreen**: `AndroidView { PreviewView }` inside `Box`. `ServiceConnection` binds to `MonitoringService` to `attachPreview`/`detachPreview`. Toggle button start/stop calls `viewModel.startMonitoring/stopMonitoring`. Overlays: state pill, radial score gauge, calibration progress bar, positioning warning banner, and `LightingWarningBanner` when mode is LOW_LIGHT/DARK. `MonitoringViewModel` maintains `frameWindow` (rolling 60 s of face-detected flags) to trigger a "reposicione o rosto" warning when > 30 % of frames are NO_FACE; it also unpacks `assessment.lightingMode` (String) into the `LightingMode` enum via `runCatching { LightingMode.valueOf(...) }`.
 - **HistoryScreen**: `LazyColumn` of `SessionSummary` items sorted newest-first. `SessionRepository.getSessions()` reloads on `Lifecycle.State.RESUMED` via `repeatOnLifecycle`. Export via `FileProvider` + `Intent.ACTION_SEND_MULTIPLE` (CSV + JSON).
 
 ### Theme
@@ -243,15 +322,18 @@ Manifest highlights:
 ## Testing
 
 Unit tests (`app/src/test/`):
-- **FatigueScorerTest** — 13 tests: PERCLOS calc, blink detection, yawn (2 s trigger), NORMAL→WARNING/WARNING→FATIGUED/WARNING→NORMAL hysteresis, reset, calibration stabilization, consecutive-session score integrity, look-away not inflating PERCLOS, look-away preserving buffer, PERCLOS-alone can't promote to FATIGUED.
+- **FatigueScorerTest** — 21 tests: PERCLOS calc, blink detection, yawn (1.5 s trigger), NORMAL↔WARNING↔FATIGUED hysteresis, reset, calibration stabilization + tolerance + hard cap, consecutive-session score integrity, look-away not inflating PERCLOS, look-away preserving buffer, PERCLOS-alone can't promote to FATIGUED, NO_FACE grace, post-calibration perclosWindow seeding.
 - **TelemetryWriterTest** — 3 tests: two consecutive sessions both persist summaries, `startSession` guard-rail finalizes unfinished previous session, single session write/stop.
 - **SessionRepositoryTest** — 2 tests: sessions sorted by startTime desc, folder path resolution.
+- **LightingMonitorTest** (`app/src/test/java/com/vigilia/app/lighting/`) — 11 tests: starts in NORMAL, single dark frame doesn't flip, sustained 2 s → DARK, asymmetric 3 s exit dwell, brief 1 s tunnel doesn't commit, null-lux classification, reset.
+- **FaceAnalyzerLightingModeTest** (`app/src/test/java/com/vigilia/app/camera/`) — 6 tests: `shouldApplyClahe(mode)` decisions, `gammaFor(mode)` mapping, gamma ordering (DARK > LOW_LIGHT > NORMAL).
+- **LuminanceCalcTest** (same directory) — 6 tests: `computeYPlaneMean` on uniform buffers, unsigned byte masking (0xFF), rowStride padding, zero-dim guard, buffer bounds.
 
 Patterns:
 - JUnit 4 + `@Rule TemporaryFolder` for file I/O isolation.
 - No Mockito — `FatigueMetrics` values are hand-crafted per frame.
 - `runBlocking { ... }` inside tests for suspending TelemetryWriter calls.
-- Uncovered by unit tests: `MonitoringService`, `MonitoringViewModel`, `SetupViewModel`, `AuthViewModel`, `HistoryViewModel`, `CameraManager`, `FaceAnalyzer`, `AuthRepository`, `SyncRepository`, `SyncWorker`. These are verified by smoke testing on device.
+- Uncovered by unit tests: `MonitoringService`, `MonitoringViewModel`, `SetupViewModel`, `AuthViewModel`, `HistoryViewModel`, `CameraManager`, `FaceAnalyzer` (end-to-end enhance pipeline), `AuthRepository`, `SyncRepository`, `SyncWorker`. These are verified by smoke testing on device. Fase-1 helpers (`shouldApplyClahe`, `gammaFor`, `computeYPlaneMean`, `LightingMonitor.update`) are unit-tested; the OpenCV Mat operations in `FaceAnalyzer.enhance` are not (needs instrumented tests).
 
 ## File organization
 
@@ -259,17 +341,19 @@ Patterns:
 app/src/main/java/com/vigilia/app/
 ├── MainActivity.kt                   # Nav host + deep link handling
 ├── service/
-│   ├── MonitoringService.kt          # Foreground service, monitoring loop
-│   ├── ServiceController.kt          # start/stop helper + calibration preference
+│   ├── MonitoringService.kt          # Foreground service, monitoring loop, LightingMonitor wiring
+│   ├── ServiceController.kt          # start/stop helper + calibration & low-light preferences
 │   └── SyncWorker.kt                 # WorkManager job for Supabase upload
 ├── camera/
-│   ├── CameraManager.kt              # CameraX use case binding
-│   └── FaceAnalyzer.kt               # MediaPipe landmarker + EAR + yaw/pitch
+│   ├── CameraManager.kt              # CameraX binding + Camera2Interop lighting-mode tuning
+│   └── FaceAnalyzer.kt               # MediaPipe landmarker + EAR + yaw/pitch + OpenCV CLAHE
+├── lighting/
+│   └── LightingMonitor.kt            # NORMAL/LOW_LIGHT/DARK FSM with hysteresis + dwell
 ├── domain/
 │   ├── model/
 │   │   └── FatigueModels.kt          # FatigueMetrics, FatigueAssessment, SessionSummary, TelemetryRecord, FatigueState
 │   └── scoring/
-│       └── FatigueScorer.kt          # Algorithm + FSM
+│       └── FatigueScorer.kt          # Algorithm + FSM + dark-mode NO_FACE grace
 ├── data/
 │   ├── telemetry/
 │   │   └── TelemetryWriter.kt        # Local CSV/JSON + writeMutex
@@ -291,8 +375,9 @@ app/src/main/java/com/vigilia/app/
 
 ## Dependencies (see `gradle/libs.versions.toml`)
 
-- **CameraX** 1.6.1: core, camera2, lifecycle, view
+- **CameraX** 1.6.1: core, camera2, lifecycle, view (camera2-interop used for lighting-mode tuning)
 - **MediaPipe** Tasks Vision 0.10.14 (not ML Kit — this doc previously misidentified the library)
+- **OpenCV** 4.11.0 (Fase 1 — CLAHE + gamma LUT preprocessing in `FaceAnalyzer`)
 - **Compose** BOM 2026.05.00 (Material 3)
 - **Navigation Compose** 2.9.8
 - **Supabase-kt** 3.1.4 (auth + postgrest + android engine) with Ktor 3.1.2 client
@@ -305,10 +390,11 @@ app/src/main/java/com/vigilia/app/
 
 All tuning constants are in `FatigueScorer.kt`'s `companion object`. Common tweaks:
 
-- Increase `TRANSITION_NORMAL_TO_WARNING_MS` (currently 2000) to be less trigger-happy on WARNING.
+- Increase `TRANSITION_NORMAL_TO_WARNING_MS` (currently 3000) to be less trigger-happy on WARNING.
 - Increase `LOOK_AWAY_YAW_DEGREES` (currently 25) if drivers legitimately turn further while still monitoring the phone camera.
-- Increase `CALIBRATION_STABILIZATION_MS` (currently 1500) if devices with fast MediaPipe init still catch too-early samples.
-- Note the score weights sum to 110 — this is intentional (see "Score weights").
+- Increase `CALIBRATION_STABILIZATION_MS` (currently 800) if devices with fast MediaPipe init still catch too-early samples.
+- Note the score weights sum to 105 — this is intentional (see "Score weights").
+- To retune Fase-1 lighting behavior, edit constants in `LightingMonitor.companion object` (thresholds, dwell) and `FaceAnalyzer.companion object` (`GAMMA_LOW_LIGHT`, `GAMMA_DARK`, `CLAHE_CLIP_LIMIT`, `CLAHE_TILE_SIZE`). Camera2 knobs live in `CameraManager.applyLightingMode`.
 
 ## Debug telemetry
 
@@ -349,7 +435,7 @@ adb shell dumpsys power | grep vigilia
 
 ## History of decisions worth remembering
 
-- **Weights are 65/20/25, not 50/30/20** (as an earlier draft of this doc suggested). Total = 110, clamped to 100. This keeps FATIGUED (score > 70) unreachable by any single signal.
+- **Weights are 65/15/25, not 50/30/20** (as an earlier draft of this doc suggested). Total = 105, clamped to 100. This keeps FATIGUED (score > 70) unreachable by any single signal. `SCORE_WEIGHT_BLINK` was pulled from 20 → 15 in commit `3c30b8a` after focused/dry-eye blink rates (~25/min) were tripping WARNING on their own.
 - **PERCLOS window is 30 s** — briefly tried 6 s (commit before `9f97457`); it was too sensitive to natural look-away and single 5 s eye-closure episodes. Reverted.
 - **WARNING → FATIGUED threshold is 70** — briefly tried 55 (before `9f97457`); PERCLOS = ~0.85 alone would trip it. Reverted to 70 so combination of signals is required.
 - **Calibration is capped at 10 s total** — 800 ms stabilization gate with `openness ≥ 0.35` and up to 3 blink-tolerance frames, plus a hard 3 s upper bound that force-starts collection when framing/lighting is chronically bad. Sample collection is 7 s. Originally added as an unbounded 1.5 s / `openness ≥ 0.5` gate (`0faa6a5`) that could stall for a minute or more with natural blinks or glasses; this iteration makes it robust and time-bounded.
@@ -359,4 +445,5 @@ adb shell dumpsys power | grep vigilia
 - **Head yaw / pitch pause scoring during look-away** (commit `9f97457`) — mirrors, dashboard checks, side glances no longer inflate PERCLOS.
 - **Raise the WARNING trigger and widen the healthy blink range**: `TRANSITION_NORMAL_TO_WARNING_SCORE` 40 → 50, `TRANSITION_NORMAL_TO_WARNING_MS` 2 000 → 3 000, `BLINK_RATE_MAX` 20 → 24, `BLINK_DEVIATION_LIMIT_HIGH` 25 → 32. Even after the PERCLOS-70 realignment (`3c30b8a`), users blinking at 25/min (normal when focused on the front camera) were still hitting `blink deviation = 1.0` and landing near the WARNING threshold. The new numbers mean PERCLOS alone needs 77 % closure sustained 3 s, and blink deviation caps out at rates over 30/min — real fatigue signals still trigger, casual focused blinking does not. Recovery threshold (30) and FATIGUED gate (70) unchanged.
 - **Seed `perclosWindow` from calibration samples at the end of the collection phase** — otherwise the buffer is empty at the exact moment state flips to NORMAL, and a single natural blink (5 closed frames in a buffer of ~6) inflates PERCLOS to ~80 %, spiking the score right after calibration. `calibrationSamples` was extended to `MutableList<Pair<Long, Float>>` (timestamp + openness) so the samples can be re-evaluated against the newly-computed threshold and pushed into the window. `monitoringStartMs` is also anchored at the start of the collection phase so blink warmup runs in parallel with calibration.
-- **PERCLOS-70 realignment + sub-score telemetry**: `EYE_CLOSED_RATIO` dropped from 0.60 to 0.40, `EYE_CLOSED_MAX` from 0.60 to 0.45, `SCORE_WEIGHT_BLINK` from 20 to 15, `TRANSITION_WARNING_TO_NORMAL_SCORE` from 25 to 30. Before this the calibrated eye-closed threshold sat around 0.51, so normally-open frames were counted as closed → PERCLOS baseline was ~30 % (should be ~5 %), score got stuck around 26-30, and recovery from WARNING to NORMAL never converged (25 threshold unreachable). Also added four sub-score columns to `session.csv` (`perclos`, `perclosContribution`, `blinkContribution`, `yawnContribution`) and mirror fields in `FatigueAssessment` / `TelemetryRecord` / `TelemetryRecordDto` so future weight tuning can be data-driven instead of guesswork. Supabase schema needs matching columns before sync will populate them server-side (SQL migration is a manual TODO in that dashboard).
+- **PERCLOS-70 realignment + sub-score telemetry**: `EYE_CLOSED_RATIO` dropped from 0.60 to 0.40, `EYE_CLOSED_MAX` from 0.60 to 0.45, `SCORE_WEIGHT_BLINK` from 20 to 15, `TRANSITION_WARNING_TO_NORMAL_SCORE` from 25 to 30. Before this the calibrated eye-closed threshold sat around 0.51, so normally-open frames were counted as closed → PERCLOS baseline was ~30 % (should be ~5 %), score got stuck around 26-30, and recovery from WARNING to NORMAL never converged (25 threshold unreachable). Also added four sub-score columns to `session.csv` (`perclos`, `perclosContribution`, `blinkContribution`, `yawnContribution`) and mirror fields in `FatigueAssessment` / `TelemetryRecord` / `TelemetryRecordDto` so future weight tuning can be data-driven instead of guesswork.
+- **Fase 1 — lighting adaptation subsystem**: added `LightingMonitor` (NORMAL/LOW_LIGHT/DARK FSM with +15 hysteresis and asymmetric dwell 2 s darker / 3 s lighter), driven by mean Y-luminance of each frame plus optional `TYPE_LIGHT` lux. Feeds three consumers: (1) `FaceAnalyzer` applies OpenCV CLAHE (`clipLimit=2.0`, tile `8×8`) + gamma LUT (`γ=1.2` LOW_LIGHT, `γ=1.4` DARK) on Y, with reusable Mats keeping cost around ~10 ms/frame; (2) `CameraManager.applyLightingMode` hot-applies EV compensation (+1/+2 EV nudges), target FPS ranges (24-30 → 20-30 → 15-20), and `CONTROL_SCENE_MODE_NIGHT` via `Camera2CameraControl`; (3) `FatigueScorer` widens `NO_FACE_GRACE_MS` from 500 ms → 1500 ms in DARK so headlight-induced detection drops don't clear buffers. Motivation: night driving and tunnels caused runs of failed frames where PERCLOS/blink windows kept resetting, and blendshapes got noisy from low contrast. `SetupScreen` gates the whole subsystem via a `lastLowLightAdaptationEnabled` toggle (default on, persisted). Three new telemetry columns (`ambient_light_lux`, `frame_luminance`, `lighting_mode`) added to `session.csv`, `TelemetryRecordDto`, and the Supabase `telemetry_records` table (schema migration applied manually in the dashboard). OpenCV 4.11.0 added as a dependency; load failures degrade silently to raw frames.
