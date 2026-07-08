@@ -31,4 +31,7 @@ data class TelemetryRecordDto(
     @SerialName("perclos_contribution") val perclosContribution: Float? = null,
     @SerialName("blink_contribution") val blinkContribution: Float? = null,
     @SerialName("yawn_contribution") val yawnContribution: Float? = null,
+    @SerialName("ambient_light_lux") val ambientLightLux: Float? = null,
+    @SerialName("frame_luminance") val frameLuminance: Float? = null,
+    @SerialName("lighting_mode") val lightingMode: String? = null,
 )

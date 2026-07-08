@@ -57,6 +57,7 @@ fun SetupScreen(
         SetupContent(
             uiState = uiState,
             onCalibrationToggled = viewModel::onCalibrationToggled,
+            onLowLightAdaptationToggled = viewModel::onLowLightAdaptationToggled,
             onRequestPermissions = {
                 permissionLauncher.launch(
                     arrayOf(
@@ -89,6 +90,7 @@ fun SetupScreen(
 fun SetupContent(
     uiState: SetupUiState,
     onCalibrationToggled: (Boolean) -> Unit,
+    onLowLightAdaptationToggled: (Boolean) -> Unit,
     onRequestPermissions: () -> Unit,
     onStartMonitoring: () -> Unit,
 ) {
@@ -250,6 +252,12 @@ fun SetupContent(
                     subtitle = "Adapta os limites ao seu rosto (5-10s)",
                     checked = uiState.isCalibrationEnabled,
                     onCheckedChange = onCalibrationToggled,
+                )
+                ToggleRow(
+                    title = "Adaptação a pouca luz",
+                    subtitle = "Ajusta exposição e realça a imagem em túneis / noite",
+                    checked = uiState.isLowLightAdaptationEnabled,
+                    onCheckedChange = onLowLightAdaptationToggled,
                 )
             }
         }
@@ -433,6 +441,7 @@ fun SetupScreenPreview() {
                 isCameraPermissionGranted = true,
             ),
             onCalibrationToggled = {},
+            onLowLightAdaptationToggled = {},
             onRequestPermissions = {},
         ) {
             // onStartMonitoring

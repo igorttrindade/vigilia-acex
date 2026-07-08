@@ -4,6 +4,7 @@ import android.util.Log
 import com.vigilia.app.domain.model.FatigueAssessment
 import com.vigilia.app.domain.model.FatigueMetrics
 import com.vigilia.app.domain.model.FatigueState
+import com.vigilia.app.lighting.LightingMode
 import java.util.ArrayDeque
 
 /**
@@ -15,7 +16,13 @@ import java.util.ArrayDeque
  * generic default. This improves accuracy for drivers with naturally smaller
  * or larger eyes.
  */
-class FatigueScorer(private val calibrationEnabled: Boolean = true) {
+class FatigueScorer(
+    private val calibrationEnabled: Boolean = true,
+    private val lightingModeProvider: () -> LightingMode = { LightingMode.NORMAL },
+    // Optional lux telemetry passthrough. When null (no TYPE_LIGHT sensor available) the
+    // scorer still functions; the field is echoed into the produced assessment for CSV logging.
+    private val ambientLuxProvider: () -> Float? = { null },
+) {
 
     private companion object {
         // 30-second rolling window aligned with the PERCLOS literature and CLAUDE.md.
@@ -81,6 +88,9 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
 
         // Grace period before NO_FACE resets the state machine — absorbs brief detection glitches
         const val NO_FACE_GRACE_MS = 500L
+        // In DARK, MediaPipe drops face-detection more often. Widen grace so a run of failed
+        // frames caused by low-light noise doesn't clear buffers on every headlight glare.
+        const val NO_FACE_GRACE_MS_DARK = 1_500L
 
         // Calibration
         const val CALIBRATION_DURATION_MS = 7_000L
@@ -171,7 +181,7 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
             if (noFaceStartTime == null) noFaceStartTime = now
             val noFaceDuration = now - noFaceStartTime!!
 
-            return if (noFaceDuration >= NO_FACE_GRACE_MS) {
+            return if (noFaceDuration >= currentNoFaceGraceMs()) {
                 // Sustained absence — transition to NO_FACE and drop stale detection buffers so
                 // score doesn't jump back to WARNING/FATIGUED from old data when face returns.
                 currentState = FatigueState.NO_FACE
@@ -532,6 +542,11 @@ class FatigueScorer(private val calibrationEnabled: Boolean = true) {
             perclosContribution = perclosContribution,
             blinkContribution = blinkContribution,
             yawnContribution = yawnContribution,
+            ambientLightLux = ambientLuxProvider(),
+            lightingMode = lightingModeProvider().name,
         )
     }
+
+    private fun currentNoFaceGraceMs(): Long =
+        if (lightingModeProvider() == LightingMode.DARK) NO_FACE_GRACE_MS_DARK else NO_FACE_GRACE_MS
 }

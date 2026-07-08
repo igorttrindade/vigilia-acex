@@ -34,8 +34,11 @@ import com.vigilia.app.domain.model.FatigueMetrics
 import com.vigilia.app.domain.model.FatigueState
 import com.vigilia.app.domain.model.TelemetryRecord
 import com.vigilia.app.domain.scoring.FatigueScorer
+import com.vigilia.app.lighting.LightingMode
+import com.vigilia.app.lighting.LightingMonitor
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Foreground Service that orchestrates the full monitoring pipeline.
@@ -52,6 +55,7 @@ class MonitoringService : Service(), LifecycleOwner {
         const val ACTION_START = "com.vigilia.app.START_MONITORING"
         const val ACTION_STOP = "com.vigilia.app.STOP_MONITORING"
         const val EXTRA_CALIBRATION_ENABLED = "extra_calibration_enabled"
+        const val EXTRA_LOW_LIGHT_ADAPTATION_ENABLED = "extra_low_light_enabled"
         private const val CHANNEL_ID = "vigilia_monitoring"
         private const val NOTIFICATION_ID = 1
         private const val ALERT_COOLDOWN_MS = 8_000L
@@ -86,6 +90,10 @@ class MonitoringService : Service(), LifecycleOwner {
     @Volatile private var lastGyroX: Float? = null
     @Volatile private var lastGyroY: Float? = null
     @Volatile private var lastGyroZ: Float? = null
+    @Volatile private var lastAmbientLux: Float? = null
+
+    private val lightingMonitor = LightingMonitor()
+    val lightingMode: StateFlow<LightingMode> = lightingMonitor.mode
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
@@ -108,6 +116,9 @@ class MonitoringService : Service(), LifecycleOwner {
                     lastGyroX = event.values[0]
                     lastGyroY = event.values[1]
                     lastGyroZ = event.values[2]
+                }
+                Sensor.TYPE_LIGHT -> {
+                    lastAmbientLux = event.values[0]
                 }
             }
         }
@@ -146,17 +157,31 @@ class MonitoringService : Service(), LifecycleOwner {
         when (intent?.action) {
             ACTION_START -> {
                 val calibrationEnabled = intent.getBooleanExtra(EXTRA_CALIBRATION_ENABLED, true)
-                startMonitoring(calibrationEnabled)
+                val lowLightEnabled = intent.getBooleanExtra(EXTRA_LOW_LIGHT_ADAPTATION_ENABLED, true)
+                startMonitoring(calibrationEnabled, lowLightEnabled)
             }
             ACTION_STOP -> stopMonitoring()
         }
         return START_NOT_STICKY
     }
 
-    private fun startMonitoring(calibrationEnabled: Boolean = true) {
+    // When false, LightingMonitor still classifies for telemetry (so we can see how bad the
+    // scene is in dashboards), but CameraManager.applyLightingMode and CLAHE preprocessing
+    // are skipped — behavior is identical to the pre-Fase-1 app.
+    @Volatile private var lowLightAdaptationEnabled: Boolean = true
+
+    private fun startMonitoring(calibrationEnabled: Boolean = true, lowLightEnabled: Boolean = true) {
         if (isProcessRunning) return
 
-        scorer = FatigueScorer(calibrationEnabled)
+        lowLightAdaptationEnabled = lowLightEnabled
+        scorer = FatigueScorer(
+            calibrationEnabled = calibrationEnabled,
+            // Even when adaptation is off, the scorer still receives the mode for telemetry.
+            // Only the *effect* of the mode (grace, camera tuning, CLAHE) is gated below.
+            lightingModeProvider = { lightingMonitor.mode.value },
+            ambientLuxProvider = { lastAmbientLux },
+        )
+        lightingMonitor.reset()
         startForeground(NOTIFICATION_ID, createNotification("Iniciando monitoramento..."))
         startLocationUpdates()
         startSensorUpdates()
@@ -175,11 +200,23 @@ class MonitoringService : Service(), LifecycleOwner {
                         // Stop processing immediately if flag is false
                         if (!isProcessRunning) return@startCamera
 
+                        lightingMonitor.update(lastAmbientLux, metrics.frameLuminance, metrics.timestampMs)
                         val assessment = scorer.processFrame(metrics)
                         handleAssessment(assessment, metrics)
                         currentAssessment.value = assessment
                     }
                 )
+
+                // Observe lighting-mode transitions off the frame loop and hot-apply Camera2
+                // options (EV/FPS/scene). Runs in serviceScope so it's cancelled on stop.
+                // Skipped entirely when the user disabled adaptation via SetupScreen.
+                if (lowLightAdaptationEnabled) {
+                    launch {
+                        lightingMonitor.mode.collect { mode ->
+                            cameraManager.applyLightingMode(mode)
+                        }
+                    }
+                }
             } catch (e: Exception) {
                 Log.e("MonitoringService", "Failed to start monitoring", e)
                 stopMonitoring()
@@ -298,6 +335,9 @@ class MonitoringService : Service(), LifecycleOwner {
                         perclosContribution = assessment.perclosContribution,
                         blinkContribution = assessment.blinkContribution,
                         yawnContribution = assessment.yawnContribution,
+                        ambientLightLux = lastAmbientLux,
+                        frameLuminance = metrics.frameLuminance,
+                        lightingMode = lightingMonitor.mode.value.name,
                     )
                 )
             }
@@ -350,6 +390,11 @@ class MonitoringService : Service(), LifecycleOwner {
         sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)?.let {
             sensorManager.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_NORMAL)
         }
+        // TYPE_LIGHT is optional (nem todo device tem). If absent, LightingMonitor still
+        // works from the frame Y-channel alone — lux stays null in telemetry.
+        sensorManager.getDefaultSensor(Sensor.TYPE_LIGHT)?.let {
+            sensorManager.registerListener(sensorListener, it, SensorManager.SENSOR_DELAY_UI)
+        }
     }
 
     private fun stopSensorUpdates() {
@@ -357,6 +402,7 @@ class MonitoringService : Service(), LifecycleOwner {
         lastAccelX = null; lastAccelY = null; lastAccelZ = null
         lastGyroX = null; lastGyroY = null; lastGyroZ = null
         lastSpeed = null
+        lastAmbientLux = null
     }
 
     private fun startLocationUpdates() {

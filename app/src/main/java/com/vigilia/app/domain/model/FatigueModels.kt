@@ -14,6 +14,8 @@ data class FatigueMetrics(
     // continue to behave as before (treated as looking straight at the camera).
     val headYawDegrees: Float = 0f,
     val headPitchDegrees: Float = 0f,
+    // Mean Y-channel luminance of the frame, [0..255]. Feeds LightingMonitor.
+    val frameLuminance: Float = 0f,
 )
 
 data class FatigueAssessment(
@@ -31,6 +33,9 @@ data class FatigueAssessment(
     val perclosContribution: Float = 0f,   // 0..SCORE_WEIGHT_PERCLOS
     val blinkContribution: Float = 0f,     // 0..SCORE_WEIGHT_BLINK
     val yawnContribution: Float = 0f,      // 0 or SCORE_WEIGHT_YAWN
+    // Lighting context (Fase 1). ambientLightLux is null on devices without TYPE_LIGHT.
+    val ambientLightLux: Float? = null,
+    val lightingMode: String = "NORMAL",
 )
 
 data class SessionSummary(
@@ -70,4 +75,7 @@ data class TelemetryRecord(
     val perclosContribution: Float = 0f,
     val blinkContribution: Float = 0f,
     val yawnContribution: Float = 0f,
+    val ambientLightLux: Float? = null,
+    val frameLuminance: Float = 0f,
+    val lightingMode: String = "NORMAL",
 )

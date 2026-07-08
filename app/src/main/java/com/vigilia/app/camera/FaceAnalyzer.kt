@@ -1,21 +1,31 @@
 package com.vigilia.app.camera
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import com.google.mediapipe.framework.image.BitmapImageBuilder
+import java.nio.ByteBuffer
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.ImageProcessingOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
 import com.vigilia.app.domain.model.FatigueMetrics
+import com.vigilia.app.lighting.LightingMode
 import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.atan2
+import org.opencv.android.OpenCVLoader
+import org.opencv.android.Utils
+import org.opencv.core.Core
+import org.opencv.core.CvType
+import org.opencv.core.Mat
+import org.opencv.core.Size as CvSize
+import org.opencv.imgproc.Imgproc
 
 /**
  * Extracts face metrics from camera frames using MediaPipe FaceLandmarker.
@@ -35,10 +45,30 @@ import kotlin.math.atan2
 class FaceAnalyzer(
     private val context: Context,
     private val onMetricsAvailable: (FatigueMetrics) -> Unit,
+    private val lightingModeProvider: () -> LightingMode = { LightingMode.NORMAL },
 ) : ImageAnalysis.Analyzer {
 
     @Volatile private var faceLandmarker: FaceLandmarker? = null
     @Volatile private var closed = false
+
+    // OpenCV reusable Mats — allocate once per analyzer, reuse per frame so CLAHE stays
+    // ~10ms instead of the ~25ms it costs when Mats are reallocated. All access is on the
+    // single-threaded analysis executor, so no synchronization needed.
+    private val opencvReady: Boolean = try {
+        OpenCVLoader.initLocal()
+    } catch (e: Throwable) {
+        Log.w("FaceAnalyzer", "OpenCV init failed — CLAHE will be skipped", e)
+        false
+    }
+    // OpenCV lacks direct RGBA↔YCrCb converters — we go RGBA → RGB → YCrCb and back. All
+    // Mats are reused across frames (see comment above).
+    private val rgbaMat by lazy { Mat() }
+    private val rgbMat by lazy { Mat() }
+    private val yuvMat by lazy { Mat() }
+    private val yuvChannels by lazy { ArrayList<Mat>(3) }
+    private val gammaLutLow by lazy { buildGammaLut(GAMMA_LOW_LIGHT) }
+    private val gammaLutDark by lazy { buildGammaLut(GAMMA_DARK) }
+    private val clahe by lazy { Imgproc.createCLAHE(CLAHE_CLIP_LIMIT, CvSize(CLAHE_TILE_SIZE, CLAHE_TILE_SIZE)) }
 
     init {
         // FaceLandmarker.createFromOptions() requires a thread with a Looper; schedule on main.
@@ -74,9 +104,23 @@ class FaceAnalyzer(
             return
         }
         try {
+            // Read frame luminance from the Y plane before toBitmap() runs — toBitmap may
+            // consume buffer positions on some devices. Cheap (~0.3ms) and feeds LightingMonitor.
+            val yPlane = imageProxy.planes[0]
+            val frameLuminance = computeYPlaneMean(
+                yPlane.buffer,
+                yPlane.rowStride,
+                imageProxy.width,
+                imageProxy.height,
+            )
+
             // toBitmap() converts YUV_420_888 → ARGB_8888, avoiding MediaImageBuilder
             // compatibility issues across devices and CameraX versions.
-            val bitmap = imageProxy.toBitmap()
+            val rawBitmap = imageProxy.toBitmap()
+            val mode = lightingModeProvider()
+            val bitmap = if (shouldApplyClahe(mode) && opencvReady) {
+                enhance(rawBitmap, gammaFor(mode))
+            } else rawBitmap
             val mpImage = BitmapImageBuilder(bitmap).build()
             val imageOptions = ImageProcessingOptions.builder()
                 .setRotationDegrees(imageProxy.imageInfo.rotationDegrees)
@@ -102,7 +146,7 @@ class FaceAnalyzer(
                 // rather than silently defaulting to 0f (which would be read as "eyes wide open")
                 if (eyeBlinkLeft == null || eyeBlinkRight == null) {
                     Log.w("FaceAnalyzer", "Eye blendshapes missing — discarding frame as NO_FACE")
-                    createNoFaceMetrics()
+                    createNoFaceMetrics(frameLuminance)
                 } else {
                     val blendLeft  = (1f - eyeBlinkLeft).coerceIn(0f, 1f)
                     val blendRight = (1f - eyeBlinkRight).coerceIn(0f, 1f)
@@ -126,15 +170,16 @@ class FaceAnalyzer(
                         timestampMs             = System.nanoTime() / 1_000_000,
                         headYawDegrees          = headYaw,
                         headPitchDegrees        = headPitch,
+                        frameLuminance          = frameLuminance,
                     )
                 }
             } else {
-                createNoFaceMetrics()
+                createNoFaceMetrics(frameLuminance)
             }
             onMetricsAvailable(metrics)
         } catch (e: Exception) {
             Log.e("FaceAnalyzer", "Detection failed", e)
-            onMetricsAvailable(createNoFaceMetrics())
+            onMetricsAvailable(createNoFaceMetrics(0f))
         } finally {
             imageProxy.close()
         }
@@ -149,12 +194,54 @@ class FaceAnalyzer(
         }
     }
 
-    private fun createNoFaceMetrics() = FatigueMetrics(
+    /**
+     * Boosts contrast on the Y channel with CLAHE, then applies a gamma LUT for extra lift
+     * in the dark end of the histogram. Both steps run in-place on reusable Mats — the
+     * output Bitmap is a copy back so MediaPipe can consume it.
+     */
+    private fun enhance(bitmap: Bitmap, gamma: Float): Bitmap {
+        return try {
+            // OpenCV doesn't expose COLOR_RGBA2YCrCb / COLOR_YCrCb2RGBA — go through RGB.
+            // Utils.bitmapToMat writes RGBA (CV_8UC4); drop alpha, convert to YCrCb, split,
+            // enhance Y in-place, merge back, and convert to RGBA before matToBitmap.
+            Utils.bitmapToMat(bitmap, rgbaMat)
+            Imgproc.cvtColor(rgbaMat, rgbMat, Imgproc.COLOR_RGBA2RGB)
+            Imgproc.cvtColor(rgbMat, yuvMat, Imgproc.COLOR_RGB2YCrCb)
+            yuvChannels.clear()
+            Core.split(yuvMat, yuvChannels)
+            val yChannel = yuvChannels[0]
+            clahe.apply(yChannel, yChannel)
+            Core.LUT(yChannel, if (gamma == GAMMA_DARK) gammaLutDark else gammaLutLow, yChannel)
+            Core.merge(yuvChannels, yuvMat)
+            Imgproc.cvtColor(yuvMat, rgbMat, Imgproc.COLOR_YCrCb2RGB)
+            Imgproc.cvtColor(rgbMat, rgbaMat, Imgproc.COLOR_RGB2RGBA)
+            val out = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+            Utils.matToBitmap(rgbaMat, out)
+            out
+        } catch (e: Throwable) {
+            Log.w("FaceAnalyzer", "CLAHE enhance failed — falling back to raw frame", e)
+            bitmap
+        }
+    }
+
+    private fun buildGammaLut(gamma: Float): Mat {
+        val lut = Mat(1, 256, CvType.CV_8U)
+        val data = ByteArray(256)
+        val invGamma = 1.0 / gamma
+        for (i in 0..255) {
+            data[i] = (Math.pow(i / 255.0, invGamma) * 255.0).toInt().coerceIn(0, 255).toByte()
+        }
+        lut.put(0, 0, data)
+        return lut
+    }
+
+    private fun createNoFaceMetrics(frameLuminance: Float = 0f) = FatigueMetrics(
         leftEyeOpenProbability  = 0f,
         rightEyeOpenProbability = 0f,
         mouthOpenProbability    = 0f,
         isFaceDetected          = false,
         timestampMs             = System.nanoTime() / 1_000_000,
+        frameLuminance          = frameLuminance,
     )
 
     /**
@@ -228,5 +315,61 @@ class FaceAnalyzer(
         // EAR for a fully-open eye in normalized landmark coordinates.
         // Used to map raw EAR → [0,1] openness probability.
         private const val EAR_OPEN_REFERENCE = 0.28f
+
+        // 8×8 grid ≈ 64 samples — enough for a stable mean, cheap enough to run per frame.
+        private const val LUMINANCE_SAMPLES_PER_AXIS = 8
+
+        // CLAHE tuning — moderate boost; higher clipLimit exaggerates noise in DARK.
+        private const val CLAHE_CLIP_LIMIT = 2.0
+        private const val CLAHE_TILE_SIZE = 8.0
+
+        // Gamma > 1 brightens midtones. DARK gets a stronger nudge than LOW_LIGHT.
+        const val GAMMA_LOW_LIGHT = 1.2f
+        const val GAMMA_DARK = 1.4f
+
+        /** True when the current lighting mode warrants CLAHE preprocessing. Pure — testable. */
+        fun shouldApplyClahe(mode: LightingMode): Boolean = mode != LightingMode.NORMAL
+
+        /** Gamma factor to apply to the Y channel for the given mode. Pure — testable. */
+        fun gammaFor(mode: LightingMode): Float = when (mode) {
+            LightingMode.NORMAL -> 1f
+            LightingMode.LOW_LIGHT -> GAMMA_LOW_LIGHT
+            LightingMode.DARK -> GAMMA_DARK
+        }
+
+        /**
+         * Mean of a coarse 8×8 sample grid across the Y plane of a YUV_420_888 image.
+         *
+         * The Y plane has one byte per pixel (unsigned 0..255). Bytes are signed in the
+         * JVM so we mask with 0xFF. `rowStride` may exceed [width] on some devices due to
+         * hardware padding — always index via `y * rowStride + x`, not `y * width + x`.
+         */
+        internal fun computeYPlaneMean(
+            buffer: ByteBuffer,
+            rowStride: Int,
+            width: Int,
+            height: Int,
+        ): Float {
+            if (width <= 0 || height <= 0) return 0f
+            val stepX = (width / LUMINANCE_SAMPLES_PER_AXIS).coerceAtLeast(1)
+            val stepY = (height / LUMINANCE_SAMPLES_PER_AXIS).coerceAtLeast(1)
+            val limit = buffer.limit()
+            var sum = 0L
+            var count = 0
+            var y = 0
+            while (y < height) {
+                var x = 0
+                while (x < width) {
+                    val pos = y * rowStride + x
+                    if (pos < limit) {
+                        sum += buffer.get(pos).toInt() and 0xFF
+                        count++
+                    }
+                    x += stepX
+                }
+                y += stepY
+            }
+            return if (count == 0) 0f else sum.toFloat() / count.toFloat()
+        }
     }
 }

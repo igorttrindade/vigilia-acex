@@ -136,6 +136,10 @@ class SyncRepository(private val context: Context) {
                 perclosContribution = if (p.size > 19) p[19].toFloatOrNull() else null,
                 blinkContribution = if (p.size > 20) p[20].toFloatOrNull() else null,
                 yawnContribution = if (p.size > 21) p[21].toFloatOrNull() else null,
+                // Lighting columns (Fase 1). Absent on pre-lighting sessions → null.
+                ambientLightLux = if (p.size > 22) p[22].toFloatOrNull() else null,
+                frameLuminance = if (p.size > 23) p[23].toFloatOrNull() else null,
+                lightingMode = if (p.size > 24 && p[24].isNotBlank()) p[24] else null,
             )
         } catch (e: Exception) {
             Log.w("SyncRepository", "Failed to parse CSV line: $line", e)

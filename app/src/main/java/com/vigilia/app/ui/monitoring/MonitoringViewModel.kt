@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.vigilia.app.domain.model.FatigueAssessment
+import com.vigilia.app.lighting.LightingMode
 import com.vigilia.app.service.MonitoringService
 import com.vigilia.app.service.ServiceController
 import kotlinx.coroutines.Job
@@ -24,6 +25,7 @@ data class MonitoringUiState(
     val elapsedTimeFormatted: String = "00:00:00",
     val alertCount: Int = 0,
     val showPositioningWarning: Boolean = false,
+    val lightingMode: LightingMode = LightingMode.NORMAL,
 )
 
 /**
@@ -77,11 +79,16 @@ class MonitoringViewModel : ViewModel() {
                         state.alertCount
                     }
 
+                    val lightingMode = assessment?.lightingMode
+                        ?.let { runCatching { LightingMode.valueOf(it) }.getOrNull() }
+                        ?: LightingMode.NORMAL
+
                     state.copy(
                         assessment = assessment,
                         isMonitoringActive = isActive,
                         alertCount = newAlertCount,
                         showPositioningWarning = positioningWarning,
+                        lightingMode = lightingMode,
                     )
                 }
             }

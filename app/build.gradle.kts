@@ -94,6 +94,10 @@ dependencies {
     implementation(libs.play.services.location)
     implementation(libs.androidx.work.runtime.ktx)
 
+    // OpenCV — used only for CLAHE + gamma preprocessing in low-light mode. Loader init is
+    // wrapped in try/catch so the app degrades gracefully if native libs fail on a device.
+    implementation(libs.opencv)
+
     testImplementation("org.json:json:20231013")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

@@ -18,6 +18,7 @@ data class SetupUiState(
     val isCameraPermissionGranted: Boolean = false,
     val isLocationPermissionGranted: Boolean = false,
     val isCalibrationEnabled: Boolean = true,
+    val isLowLightAdaptationEnabled: Boolean = true,
     val canStartMonitoring: Boolean = false,
 )
 
@@ -33,6 +34,7 @@ class SetupViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         checkInitialPermissions()
+        _uiState.update { it.copy(isLowLightAdaptationEnabled = ServiceController.lastLowLightAdaptationEnabled) }
     }
 
     private fun checkInitialPermissions() {
@@ -73,11 +75,22 @@ class SetupViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Toggles the low-light adaptation pipeline (Camera2Interop EV/FPS tuning + OpenCV CLAHE).
+     */
+    fun onLowLightAdaptationToggled(enabled: Boolean) {
+        _uiState.update { it.copy(isLowLightAdaptationEnabled = enabled) }
+    }
+
+    /**
      * Starts the fatigue monitoring service.
      */
     fun startMonitoring() {
         if (_uiState.value.canStartMonitoring) {
-            ServiceController.startMonitoring(getApplication(), _uiState.value.isCalibrationEnabled)
+            ServiceController.startMonitoring(
+                context = getApplication(),
+                calibrationEnabled = _uiState.value.isCalibrationEnabled,
+                lowLightAdaptationEnabled = _uiState.value.isLowLightAdaptationEnabled,
+            )
         }
     }
 

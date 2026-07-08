@@ -16,19 +16,34 @@ object ServiceController {
     @Volatile
     private var lastCalibrationEnabled: Boolean = true
 
+    // Preference for the low-light adaptation pipeline (Camera2Interop EV/FPS tuning + CLAHE).
+    // Defaults to ON so night driving is monitored out of the box; user can flip it off in
+    // SetupScreen if adaptation causes issues on a specific device.
+    @Volatile
+    var lastLowLightAdaptationEnabled: Boolean = true
+        private set
+
     /**
      * Starts the fatigue monitoring service.
      *
      * @param context The context used to start the service.
      * @param calibrationEnabled If null, reuses the last explicit preference (defaults to
      *   true on first run). Pass an explicit value from SetupScreen to update it.
+     * @param lowLightAdaptationEnabled If null, reuses the last explicit preference.
      */
-    fun startMonitoring(context: Context, calibrationEnabled: Boolean? = null) {
-        val effective = calibrationEnabled ?: lastCalibrationEnabled
-        lastCalibrationEnabled = effective
+    fun startMonitoring(
+        context: Context,
+        calibrationEnabled: Boolean? = null,
+        lowLightAdaptationEnabled: Boolean? = null,
+    ) {
+        val effectiveCalibration = calibrationEnabled ?: lastCalibrationEnabled
+        lastCalibrationEnabled = effectiveCalibration
+        val effectiveLowLight = lowLightAdaptationEnabled ?: lastLowLightAdaptationEnabled
+        lastLowLightAdaptationEnabled = effectiveLowLight
         val intent = Intent(context, MonitoringService::class.java).apply {
             action = MonitoringService.ACTION_START
-            putExtra(MonitoringService.EXTRA_CALIBRATION_ENABLED, effective)
+            putExtra(MonitoringService.EXTRA_CALIBRATION_ENABLED, effectiveCalibration)
+            putExtra(MonitoringService.EXTRA_LOW_LIGHT_ADAPTATION_ENABLED, effectiveLowLight)
         }
         ContextCompat.startForegroundService(context, intent)
     }

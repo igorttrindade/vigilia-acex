@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.vigilia.app.domain.model.FatigueState
+import com.vigilia.app.lighting.LightingMode
 import com.vigilia.app.service.MonitoringService
 import com.vigilia.app.ui.theme.*
 
@@ -196,6 +197,58 @@ fun MonitoringOverlay(uiState: MonitoringUiState) {
             exit = slideOutVertically { -it } + fadeOut(),
         ) {
             PositioningWarningBanner(onDismiss = { dismissedAtMs = System.currentTimeMillis() })
+        }
+
+        AnimatedVisibility(
+            visible = uiState.lightingMode != LightingMode.NORMAL,
+            enter = slideInVertically { -it } + fadeIn(),
+            exit = slideOutVertically { -it } + fadeOut(),
+        ) {
+            Column {
+                Spacer(modifier = Modifier.height(8.dp))
+                LightingWarningBanner(mode = uiState.lightingMode)
+            }
+        }
+    }
+}
+
+@Composable
+fun LightingWarningBanner(mode: LightingMode) {
+    val (title, subtitle) = when (mode) {
+        LightingMode.DARK -> "Ambiente muito escuro" to "Precisão reduzida. Ligue a luz interna do veículo."
+        LightingMode.LOW_LIGHT -> "Luz reduzida" to "Monitoramento mantido com adaptação noturna."
+        LightingMode.NORMAL -> return
+    }
+    Surface(
+        color = Color(0xFF1A1A1A).copy(alpha = 0.90f),
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, AccentAmber),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Default.VisibilityOff,
+                contentDescription = null,
+                tint = AccentAmber,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    color = AccentAmber,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    text = subtitle,
+                    color = AccentAmber.copy(alpha = 0.75f),
+                    fontSize = 12.sp,
+                )
+            }
         }
     }
 }
