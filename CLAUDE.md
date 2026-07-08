@@ -100,7 +100,7 @@ Constants live in the `companion object` of `FatigueScorer`. **These are the val
 |---|---|---|
 | PERCLOS | **30 000 ms** | % of eye-closed frames — primary fatigue signal |
 | Blink   | **60 000 ms** | Rolling blink count for rate deviation |
-| Yawn    | ≥ 1 500 ms sustained open + 3 000 ms cooldown | Secondary fatigue signal |
+| Yawn    | ≥ 1 500 ms sustained open + 4 000 ms cooldown | Secondary fatigue signal |
 
 ### Score weights (sum = 90, clamped to 0–100)
 - `SCORE_WEIGHT_PERCLOS = 65f`
@@ -109,7 +109,7 @@ Constants live in the `companion object` of `FatigueScorer`. **These are the val
 
 **Design decision**: total weight is intentionally under 100 to preserve the invariant that FATIGUED (>70) requires a *combination* of signals, not any single one. PERCLOS alone maxes at 65 (below 70). Blink weight was lowered from 20 → 15 → 10 across successive tunings — focus-blink at the front camera runs 25-30/min naturally, keeping deviation near 1.0, so any higher weight pushes the baseline near WARNING for wide-awake users. Yawn weight was lowered from 25 → 15 because a single yawn (tier-2 signal in the automotive literature) was tipping stationary users into FATIGUED when combined with mild PERCLOS.
 
-Exponential smoothing: `smoothedScore = 0.3 * rawScore + 0.7 * prev` (`SMOOTHING_ALPHA = 0.3`).
+Exponential smoothing: `smoothedScore = 0.2 * rawScore + 0.8 * prev` (`SMOOTHING_ALPHA = 0.2`). Convergence takes ~10-15 frames (~400-500 ms) after any raw drop — gentle enough that the score doesn't visibly "collapse" when the yawn contribution releases, while still following genuine multi-second trends.
 
 ### State machine — hysteresis transitions
 | From | To | Score threshold | Sustained duration |
@@ -117,7 +117,7 @@ Exponential smoothing: `smoothedScore = 0.3 * rawScore + 0.7 * prev` (`SMOOTHING
 | NORMAL   | WARNING  | > 50 | 3 000 ms |
 | WARNING  | FATIGUED | > 70 | 4 000 ms |
 | WARNING  | NORMAL   | < 30 | 5 000 ms |
-| FATIGUED | WARNING  | < 50 | 3 000 ms |
+| FATIGUED | WARNING  | < 50 | 4 000 ms |
 
 `TRANSITION_MAX_FRAME_DELTA_MS = 200` caps per-frame delta added to the transition accumulator — brief excursions into the neutral band don't reset progress.
 
@@ -164,15 +164,20 @@ Modes: **NORMAL → LOW_LIGHT → DARK**. Two input signals per call to `update(
 - **Y-luminance**: mean of an 8×8 grid over the Y plane (0..255), computed in `FaceAnalyzer.computeYPlaneMean` (~0.3 ms/frame).
 - **Ambient lux** (optional): `SensorManager` `TYPE_LIGHT`. Devices without the sensor pass `null` and the classifier still works from Y alone.
 
-Entry thresholds (both Y **and** lux must indicate dim, when both signals are available — mirrors the exit logic; devices with null lux fall back to Y alone):
+Asymmetric policy — **"hard to enter, easy to exit"**:
+
+**Entry** requires BOTH Y and lux (when lux is available) to indicate dim (devices without lux fall back to Y alone):
 - `ENTER_DARK_Y = 30f`, `ENTER_DARK_LUX = 5f`
 - `ENTER_LOW_Y = 65f`, `ENTER_LOW_LUX = 50f`
 
-Exit thresholds (+15 hysteresis on Y — Y must clear the *higher* value to leave a mode):
-- `EXIT_DARK_Y = 45f`, `EXIT_DARK_LUX = 20f`
-- `EXIT_LOW_Y = 80f`, `EXIT_LOW_LUX = 65f`
+**Exit** uses Y alone (with +15 hysteresis):
+- `EXIT_DARK_Y = 45f`
+- `EXIT_LOW_Y = 80f`
+- (`EXIT_DARK_LUX = 20f` and `EXIT_LOW_LUX = 65f` are kept as constants but no longer consulted on exit.)
 
-**Why AND on entry** (was OR): front-camera AE routinely produces frame Y in the 60-90 range even in bright rooms because it spot-meters the face. Under OR, a normally-lit room with lux ≈ 300 but frame Y = 70 flipped to LOW_LIGHT and drove the "low light" banner in the UI. AND requires the ambient sensor to also confirm dimness before flipping. Y thresholds were also lowered (40/90 → 30/65) so devices without a lux sensor stop tripping on typical indoor scenes.
+**Why AND on entry**: front-camera AE routinely produces frame Y in the 60-90 range even in bright rooms because it spot-meters the face. Under the earlier OR policy, a normally-lit room with lux ≈ 300 but frame Y = 70 flipped to LOW_LIGHT and drove the "low light" banner. AND requires the ambient sensor to also confirm dimness before flipping.
+
+**Why Y-alone on exit**: the lux sensor is often mispositioned in real deployments — covered by a phone holder, reflective mount, or shaded corner — and can stay pinned low even in a bright room. The earlier symmetric AND-exit trapped the mode in LOW_LIGHT/DARK indefinitely in that case. Since Y is what the analysis pipeline actually processes, once Y recovers above the exit threshold, CLAHE/adaptation is no longer needed regardless of what lux reads.
 
 **Dwell**: a candidate mode change must persist for a direction-dependent window before it commits — `DWELL_MS_DARKER = 2_000L` when moving toward DARK, `DWELL_MS_LIGHTER = 3_000L` when moving back to lighter. Slower recovery is intentional: erring on "stay adapted a bit longer" is safe; premature return to NORMAL degrades detection.
 
@@ -456,4 +461,5 @@ adb shell dumpsys power | grep vigilia
 - **PERCLOS-70 realignment + sub-score telemetry**: `EYE_CLOSED_RATIO` dropped from 0.60 to 0.40, `EYE_CLOSED_MAX` from 0.60 to 0.45, `SCORE_WEIGHT_BLINK` from 20 to 15, `TRANSITION_WARNING_TO_NORMAL_SCORE` from 25 to 30. Before this the calibrated eye-closed threshold sat around 0.51, so normally-open frames were counted as closed → PERCLOS baseline was ~30 % (should be ~5 %), score got stuck around 26-30, and recovery from WARNING to NORMAL never converged (25 threshold unreachable). Also added four sub-score columns to `session.csv` (`perclos`, `perclosContribution`, `blinkContribution`, `yawnContribution`) and mirror fields in `FatigueAssessment` / `TelemetryRecord` / `TelemetryRecordDto` so future weight tuning can be data-driven instead of guesswork.
 - **Fase 1 — lighting adaptation subsystem**: added `LightingMonitor` (NORMAL/LOW_LIGHT/DARK FSM with +15 hysteresis and asymmetric dwell 2 s darker / 3 s lighter), driven by mean Y-luminance of each frame plus optional `TYPE_LIGHT` lux. Feeds three consumers: (1) `FaceAnalyzer` applies OpenCV CLAHE (`clipLimit=2.0`, tile `8×8`) + gamma LUT (`γ=1.2` LOW_LIGHT, `γ=1.4` DARK) on Y, with reusable Mats keeping cost around ~10 ms/frame; (2) `CameraManager.applyLightingMode` hot-applies EV compensation (+1/+2 EV nudges), target FPS ranges (24-30 → 20-30 → 15-20), and `CONTROL_SCENE_MODE_NIGHT` via `Camera2CameraControl`; (3) `FatigueScorer` widens `NO_FACE_GRACE_MS` from 500 ms → 1500 ms in DARK so headlight-induced detection drops don't clear buffers. Motivation: night driving and tunnels caused runs of failed frames where PERCLOS/blink windows kept resetting, and blendshapes got noisy from low contrast. `SetupScreen` gates the whole subsystem via a `lastLowLightAdaptationEnabled` toggle (default on, persisted). Three new telemetry columns (`ambient_light_lux`, `frame_luminance`, `lighting_mode`) added to `session.csv`, `TelemetryRecordDto`, and the Supabase `telemetry_records` table (schema migration applied manually in the dashboard). OpenCV 4.11.0 added as a dependency; load failures degrade silently to raw frames.
 - **LightingMonitor: raise Y thresholds and switch entry from OR to AND**: after field testing, the "Luz reduzida" / "Ambiente escuro" banner was firing in normally-lit rooms because entry required only one of Y or lux to indicate dim. Front-camera AE spot-meters on the face and routinely produces frame Y in the 60-90 range even under lux ≈ 300, so any dim frame flipped the mode. Two changes to `LightingMonitor.kt`: (1) entry logic now requires BOTH signals (when both available) to agree — matches the existing AND on exit. Devices with null lux fall back to Y alone. (2) Y thresholds lowered: `ENTER_DARK_Y` 40 → 30, `ENTER_LOW_Y` 90 → 65, `EXIT_DARK_Y` 55 → 45, `EXIT_LOW_Y` 105 → 80. Adaptation still kicks in when it should (both frame and ambient dim, or Y very low on no-sensor devices), but stationary users in well-lit rooms no longer see the banner. Also rewrote the DARK banner message: was "Precisão reduzida. Ligue a luz interna do veículo." — this instructed drivers to take an action that could be dangerous in some contexts (dark streets, security). New copy is purely informative: "Ambiente escuro / Adaptação noturna ativa — precisão pode variar."
+- **LightingMonitor: exit uses Y alone (asymmetric with AND-entry) + slower FATIGUED recovery**: two problems in the same field session — (a) the "Luz reduzida" banner never turned off after activating because the exit logic (symmetric AND with the entry) required both frame Y and ambient lux to agree on recovery; real-world lux sensors are often mispositioned (phone holder, mount, reflective bezel) and stay pinned low even in bright rooms; and (b) the prior tuning that fixed the "stuck 15-30 s in FATIGUED" swung too far — the score visually collapsed in ~150 ms after a yawn released and the state left FATIGUED in ~3 s, both feeling premature. Fixes: LightingMonitor exit changed to Y-only (lux ignored on the recovery path but still required for entry — "hard to enter, easy to exit"); `YAWN_RESET_MS` 3 000 → 4 000; `TRANSITION_FATIGUED_TO_WARNING_MS` 3 000 → 4 000 (now symmetric with the WARNING → FATIGUED upgrade gate); `SMOOTHING_ALPHA` 0.3 → 0.2 (score converges in ~10-15 frames instead of ~4-5). Expected FATIGUED recovery: 8-10 s (was 5-6 s post-first-tuning, 15-30 s originally).
 - **Tuning: reduce false positives for stationary users and speed up FATIGUED recovery**: after field testing, a user sitting still at a computer (no glasses, calibration on) reached WARNING from baseline signal, then a single yawn tipped him into FATIGUED — with recovery taking 15-30 s. Five constant changes: `SCORE_WEIGHT_BLINK` 15 → 10 (focus-blink at the phone camera drives deviation near 1.0 for wide-awake users, keeping high weight pushed the baseline near WARNING); `SCORE_WEIGHT_YAWN` 25 → 15 (yawn is tier-2 in the automotive literature — should not promote to FATIGUED unilaterally); `YAWN_RESET_MS` 5 000 → 3 000 (physical yawn is 1.5-2 s, the 5 s state extension pinned the score high during recovery); `TRANSITION_FATIGUED_TO_WARNING_MS` 5 000 → 3 000 (asymmetric with the 4 s upgrade gate was unjustified); `EYE_CLOSED_MIN` 0.15 → 0.18 (noisy calibrations could pin the threshold at 0.15 and misclassify half-open frames as closed). Weight sum drops from 105 to 90, preserving the "no single signal reaches FATIGUED" invariant with a bit more headroom. Real fatigue detection (sustained PERCLOS ≥ 50 % with corroborating signals) is unchanged and covered by the existing `WARNING to FATIGUED transition` test. New regression test `single yawn from a WARNING baseline does not promote to FATIGUED` guards the specific scenario reported.

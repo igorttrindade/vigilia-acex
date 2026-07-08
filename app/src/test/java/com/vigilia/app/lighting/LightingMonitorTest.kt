@@ -133,6 +133,27 @@ class LightingMonitorTest {
     }
 
     @Test
+    fun `LOW_LIGHT exits to NORMAL when Y recovers even if lux stays low`() {
+        // Regression for the reported bug: adaptation got stuck in LOW_LIGHT and never
+        // returned. Common cause is a lux sensor pinned low by a phone holder / mount /
+        // reflective surface while the front camera sees a well-exposed frame. Exit now
+        // uses Y alone, so a recovering frame lifts the mode regardless of the sensor.
+        // Get into LOW_LIGHT via genuine dim signals.
+        monitor.update(lux = 20f, frameLuminance = 50f, tsMs = 0L)
+        monitor.update(lux = 20f, frameLuminance = 50f, tsMs = 2100L)
+        assertEquals(LightingMode.LOW_LIGHT, monitor.mode.value)
+
+        // Y jumps to 100 (bright frame), but lux stays pinned at 20 (below EXIT_LOW_LUX=65).
+        // With the old symmetric-AND exit, this was stuck forever. With the new Y-alone
+        // exit, it should transition to NORMAL after the lighter dwell (3 s).
+        monitor.update(lux = 20f, frameLuminance = 100f, tsMs = 3000L)
+        monitor.update(lux = 20f, frameLuminance = 100f, tsMs = 5000L)
+        assertEquals(LightingMode.LOW_LIGHT, monitor.mode.value) // still within dwell
+        monitor.update(lux = 20f, frameLuminance = 100f, tsMs = 6100L)
+        assertEquals(LightingMode.NORMAL, monitor.mode.value)
+    }
+
+    @Test
     fun `reset clears state`() {
         monitor.update(null, 20f, tsMs = 0L)
         monitor.update(null, 20f, tsMs = 2100L)

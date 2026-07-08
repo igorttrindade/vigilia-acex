@@ -32,14 +32,20 @@ class FatigueScorer(
         const val BLINK_WINDOW_MS = 60_000L
         const val YAWN_THRESHOLD_PROB = 0.38f
         const val YAWN_DURATION_MS = 1_500L
-        // Was 5_000L — kept isCurrentlyYawning true for 5 s after peak, adding a fixed
-        // 25-pt slug that alone could push score past the FATIGUED gate when combined with
-        // any elevated PERCLOS. Physical yawn is ~1.5-2 s; 3 s covers with margin and lets
-        // the contribution fade during recovery instead of pinning the score high.
-        const val YAWN_RESET_MS = 3_000L
+        // Was 5_000L → 3_000L → 4_000L. 5s pinned the score high for too long. 3s made
+        // recovery feel abrupt ("score derretendo instantaneamente" when yawn releases).
+        // 4s is the middle ground: still shorter than the original penalty, but the yawn
+        // contribution fades gradually enough that the number visible to the driver drops
+        // smoothly instead of dropping in a step.
+        const val YAWN_RESET_MS = 4_000L
         // Brief mouth-close tolerance: door not reset mid-yawn due to speaking/coughing frame
         const val YAWN_GRACE_MS = 300L
-        const val SMOOTHING_ALPHA = 0.3f
+        // Was 0.3f — score converged in ~4-5 frames (~150 ms) after any raw drop, giving
+        // the "score derretendo" perception when a yawn released. 0.2 keeps 80% weight on
+        // the previous smoothed value, extending convergence to ~10-15 frames (~400-500 ms)
+        // — noticeably gentler drop without hiding real changes (transition gates still
+        // require multi-second sustain).
+        const val SMOOTHING_ALPHA = 0.2f
 
         // Generic thresholds — replaced by calibrated values when calibration runs
         const val EYE_CLOSED_THRESHOLD_DEFAULT = 0.3f
@@ -86,11 +92,12 @@ class FatigueScorer(
         const val TRANSITION_WARNING_TO_NORMAL_SCORE = 30f
         const val TRANSITION_WARNING_TO_NORMAL_MS = 5_000L
         const val TRANSITION_FATIGUED_TO_WARNING_SCORE = 50f
-        // Was 5_000L — asymmetric with the upgrade gate (4 s). Reduced to 3 s so a driver
-        // who has clearly recovered isn't held in the alarm state longer than needed. Still
-        // filters transient dips: score must sit under 50 for 3 s of real time, which the
-        // exponential smoothing (α=0.3) prevents from happening on any brief drop.
-        const val TRANSITION_FATIGUED_TO_WARNING_MS = 3_000L
+        // Was 5_000L → 3_000L → 4_000L. 5s felt "stuck" after recovery. 3s felt too
+        // trigger-happy in the other direction — a brief posture correction dropped the
+        // alert prematurely. 4s matches the upgrade gate (WARNING→FATIGUED = 4s), so both
+        // directions require equal sustain. Combined with the slower smoothing (α=0.2) and
+        // the 1s-longer yawn window, recovery lands around 8-10s total.
+        const val TRANSITION_FATIGUED_TO_WARNING_MS = 4_000L
 
         // Cap on per-frame delta added to the transition accumulator. Prevents brief
         // excursions into the neutral score band from resetting recovery progress

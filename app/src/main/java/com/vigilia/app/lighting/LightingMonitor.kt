@@ -60,27 +60,26 @@ class LightingMonitor {
     }
 
     private fun classify(current: LightingMode, lux: Float?, y: Float): LightingMode {
-        // Entry requires BOTH signals to indicate "dim" when both are available. Earlier
-        // versions used OR here, which flipped to LOW_LIGHT/DARK whenever either signal
-        // dropped — front-camera AE routinely produces frame Y around 60-90 in normally-lit
-        // rooms (spot-metering on face, conservative exposure), triggering the banner in
-        // bright ambient. AND removes that false positive while keeping the mode responsive
-        // when both frame and ambient really are dim. Exit logic already used AND, so this
-        // makes entry/exit symmetric.
+        // Asymmetric policy — "hard to enter, easy to exit":
+        //   Entry: BOTH signals must agree (AND) — prevents false positives from front-camera
+        //   AE producing frame Y 60-90 in normally-lit rooms; lux corroborates as ambient truth.
+        //   Exit: Y ALONE is sufficient. The lux sensor is often mispositioned (covered by
+        //   phone holder, bezel, reflective mount) and can stay pinned low even in a bright
+        //   room, which used to trap the mode in LOW_LIGHT/DARK forever with the earlier
+        //   symmetric AND-exit. Since Y is what the pipeline actually processes, when Y
+        //   recovers we no longer need CLAHE/adaptation regardless of what lux reads.
         val luxIsDark = lux == null || lux < ENTER_DARK_LUX
         val luxIsLow = lux == null || lux < ENTER_LOW_LUX
-        val luxExitDark = lux == null || lux >= EXIT_DARK_LUX
-        val luxExitLow = lux == null || lux >= EXIT_LOW_LUX
 
         if (y < ENTER_DARK_Y && luxIsDark) return LightingMode.DARK
 
         return when (current) {
             LightingMode.DARK -> {
-                if (y >= EXIT_DARK_Y && luxExitDark) LightingMode.LOW_LIGHT
+                if (y >= EXIT_DARK_Y) LightingMode.LOW_LIGHT
                 else LightingMode.DARK
             }
             LightingMode.LOW_LIGHT -> {
-                if (y >= EXIT_LOW_Y && luxExitLow) LightingMode.NORMAL
+                if (y >= EXIT_LOW_Y) LightingMode.NORMAL
                 else LightingMode.LOW_LIGHT
             }
             LightingMode.NORMAL -> {
