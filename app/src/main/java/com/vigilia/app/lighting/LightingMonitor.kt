@@ -60,32 +60,47 @@ class LightingMonitor {
     }
 
     private fun classify(current: LightingMode, lux: Float?, y: Float): LightingMode {
-        if (y < ENTER_DARK_Y || (lux != null && lux < ENTER_DARK_LUX)) return LightingMode.DARK
+        // Entry requires BOTH signals to indicate "dim" when both are available. Earlier
+        // versions used OR here, which flipped to LOW_LIGHT/DARK whenever either signal
+        // dropped — front-camera AE routinely produces frame Y around 60-90 in normally-lit
+        // rooms (spot-metering on face, conservative exposure), triggering the banner in
+        // bright ambient. AND removes that false positive while keeping the mode responsive
+        // when both frame and ambient really are dim. Exit logic already used AND, so this
+        // makes entry/exit symmetric.
+        val luxIsDark = lux == null || lux < ENTER_DARK_LUX
+        val luxIsLow = lux == null || lux < ENTER_LOW_LUX
+        val luxExitDark = lux == null || lux >= EXIT_DARK_LUX
+        val luxExitLow = lux == null || lux >= EXIT_LOW_LUX
+
+        if (y < ENTER_DARK_Y && luxIsDark) return LightingMode.DARK
 
         return when (current) {
             LightingMode.DARK -> {
-                if (y >= EXIT_DARK_Y && (lux == null || lux >= EXIT_DARK_LUX)) LightingMode.LOW_LIGHT
+                if (y >= EXIT_DARK_Y && luxExitDark) LightingMode.LOW_LIGHT
                 else LightingMode.DARK
             }
             LightingMode.LOW_LIGHT -> {
-                if (y >= EXIT_LOW_Y && (lux == null || lux >= EXIT_LOW_LUX)) LightingMode.NORMAL
+                if (y >= EXIT_LOW_Y && luxExitLow) LightingMode.NORMAL
                 else LightingMode.LOW_LIGHT
             }
             LightingMode.NORMAL -> {
-                if (y < ENTER_LOW_Y || (lux != null && lux < ENTER_LOW_LUX)) LightingMode.LOW_LIGHT
+                if (y < ENTER_LOW_Y && luxIsLow) LightingMode.LOW_LIGHT
                 else LightingMode.NORMAL
             }
         }
     }
 
     companion object {
-        const val ENTER_DARK_Y = 40f
-        const val ENTER_LOW_Y = 90f
+        // Y thresholds were 40 / 90 — too high for typical front-camera output in normal
+        // indoor lighting (spot-metered face frames land in 60-90 range routinely). Lowered
+        // so LOW_LIGHT only triggers when frames are genuinely dim (below ~28% brightness).
+        const val ENTER_DARK_Y = 30f     // was 40
+        const val ENTER_LOW_Y = 65f      // was 90
         const val ENTER_DARK_LUX = 5f
         const val ENTER_LOW_LUX = 50f
 
-        const val EXIT_DARK_Y = 55f
-        const val EXIT_LOW_Y = 105f
+        const val EXIT_DARK_Y = 45f      // was 55
+        const val EXIT_LOW_Y = 80f       // was 105
         const val EXIT_DARK_LUX = 20f
         const val EXIT_LOW_LUX = 65f
 

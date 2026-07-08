@@ -47,9 +47,9 @@ class LightingMonitorTest {
 
     @Test
     fun `borderline low light commits to LOW_LIGHT not DARK`() {
-        // Y=70 puts it in LOW_LIGHT range [40,90).
-        monitor.update(null, 70f, tsMs = 0L)
-        monitor.update(null, 70f, tsMs = 2100L)
+        // Y=50 puts it in LOW_LIGHT range [30, 65).
+        monitor.update(null, 50f, tsMs = 0L)
+        monitor.update(null, 50f, tsMs = 2100L)
         assertEquals(LightingMode.LOW_LIGHT, monitor.mode.value)
     }
 
@@ -60,35 +60,35 @@ class LightingMonitorTest {
         monitor.update(null, 20f, tsMs = 2000L)
         assertEquals(LightingMode.DARK, monitor.mode.value)
 
-        // Y=50 is above enter-DARK (40) but below EXIT_DARK_Y=55 → still DARK.
-        monitor.update(null, 50f, tsMs = 3000L)
-        monitor.update(null, 50f, tsMs = 7000L)
+        // Y=40 is above enter-DARK (30) but below EXIT_DARK_Y=45 → still DARK.
+        monitor.update(null, 40f, tsMs = 3000L)
+        monitor.update(null, 40f, tsMs = 7000L)
         assertEquals(LightingMode.DARK, monitor.mode.value)
 
-        // Y=60 crosses EXIT_DARK_Y=55. Target becomes LOW_LIGHT (never NORMAL from DARK).
+        // Y=55 crosses EXIT_DARK_Y=45. Target becomes LOW_LIGHT (never NORMAL from DARK).
         // Dwell lighter = 3000ms.
-        monitor.update(null, 60f, tsMs = 8000L)
-        monitor.update(null, 60f, tsMs = 10000L)
+        monitor.update(null, 55f, tsMs = 8000L)
+        monitor.update(null, 55f, tsMs = 10000L)
         assertEquals(LightingMode.DARK, monitor.mode.value) // still within lighter dwell
-        monitor.update(null, 60f, tsMs = 11000L)
+        monitor.update(null, 55f, tsMs = 11000L)
         assertEquals(LightingMode.LOW_LIGHT, monitor.mode.value)
     }
 
     @Test
     fun `exit from LOW_LIGHT to NORMAL requires plus 15 hysteresis`() {
         // Get into LOW_LIGHT.
-        monitor.update(null, 70f, tsMs = 0L)
-        monitor.update(null, 70f, tsMs = 2100L)
+        monitor.update(null, 50f, tsMs = 0L)
+        monitor.update(null, 50f, tsMs = 2100L)
         assertEquals(LightingMode.LOW_LIGHT, monitor.mode.value)
 
-        // Y=95 is above ENTER_LOW_Y=90 but below EXIT_LOW_Y=105 → still LOW_LIGHT (no target change).
-        monitor.update(null, 95f, tsMs = 3000L)
-        monitor.update(null, 95f, tsMs = 8000L)
+        // Y=75 is above ENTER_LOW_Y=65 but below EXIT_LOW_Y=80 → still LOW_LIGHT (no target change).
+        monitor.update(null, 75f, tsMs = 3000L)
+        monitor.update(null, 75f, tsMs = 8000L)
         assertEquals(LightingMode.LOW_LIGHT, monitor.mode.value)
 
-        // Y=120 crosses EXIT_LOW_Y=105. Dwell lighter = 3000ms.
-        monitor.update(null, 120f, tsMs = 9000L)
-        monitor.update(null, 120f, tsMs = 12100L)
+        // Y=95 crosses EXIT_LOW_Y=80. Dwell lighter = 3000ms.
+        monitor.update(null, 95f, tsMs = 9000L)
+        monitor.update(null, 95f, tsMs = 12100L)
         assertEquals(LightingMode.NORMAL, monitor.mode.value)
     }
 
@@ -113,10 +113,22 @@ class LightingMonitorTest {
     }
 
     @Test
-    fun `lux under threshold triggers DARK even if Y is high`() {
-        // Room with a very bright monitor but no ambient light — TYPE_LIGHT reports <5.
+    fun `bright frame with low lux stays NORMAL (AND entry logic)`() {
+        // Front-camera on a well-lit face in a room where the ambient sensor happens to read
+        // low (e.g. sensor covered, glare, or the phone is under a desk lamp with the sensor
+        // shaded). Entry requires BOTH signals to indicate dim — a bright frame overrides
+        // the low lux reading.
         monitor.update(lux = 2f, frameLuminance = 150f, tsMs = 0L)
         monitor.update(lux = 2f, frameLuminance = 150f, tsMs = 2100L)
+        assertEquals(LightingMode.NORMAL, monitor.mode.value)
+    }
+
+    @Test
+    fun `both signals dark commits to DARK`() {
+        // Genuine darkness — both the frame is dim and the ambient sensor confirms it.
+        // AND entry: both must agree before flipping. Dwell 2000ms.
+        monitor.update(lux = 2f, frameLuminance = 20f, tsMs = 0L)
+        monitor.update(lux = 2f, frameLuminance = 20f, tsMs = 2100L)
         assertEquals(LightingMode.DARK, monitor.mode.value)
     }
 

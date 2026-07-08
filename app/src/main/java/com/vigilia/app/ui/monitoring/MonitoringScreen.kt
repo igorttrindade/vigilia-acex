@@ -215,8 +215,8 @@ fun MonitoringOverlay(uiState: MonitoringUiState) {
 @Composable
 fun LightingWarningBanner(mode: LightingMode) {
     val (title, subtitle) = when (mode) {
-        LightingMode.DARK -> "Ambiente muito escuro" to "Precisão reduzida. Ligue a luz interna do veículo."
-        LightingMode.LOW_LIGHT -> "Luz reduzida" to "Monitoramento mantido com adaptação noturna."
+        LightingMode.DARK -> "Ambiente escuro" to "Adaptação noturna ativa — precisão pode variar."
+        LightingMode.LOW_LIGHT -> "Luz reduzida" to "Adaptação noturna ativa."
         LightingMode.NORMAL -> return
     }
     Surface(
