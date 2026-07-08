@@ -524,6 +524,20 @@ class MonitoringService : Service(), LifecycleOwner {
         notificationManager.notify(NOTIFICATION_ID, createNotification(formatNotificationContent(assessment)))
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // User explicitly swiped the app off the recent-apps screen. That's a stronger
+        // "I'm done" signal than backgrounding (home button, switching to another app),
+        // so we stop monitoring here — otherwise the driver hears the alarm playing from
+        // an app they thought they had closed. Foreground services survive task removal
+        // by default; overriding this is the correct place to react to the user gesture.
+        //
+        // Home button / app switch to Waze/WhatsApp/nav does NOT trigger onTaskRemoved,
+        // so those cases keep monitoring alive (still the intended behavior for drivers).
+        Log.i("MonitoringService", "Task removed — stopping monitoring")
+        if (isProcessRunning) stopMonitoring()
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         isProcessRunning = false
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
