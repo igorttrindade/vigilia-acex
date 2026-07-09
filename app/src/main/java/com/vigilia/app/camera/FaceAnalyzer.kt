@@ -51,6 +51,13 @@ class FaceAnalyzer(
     @Volatile private var faceLandmarker: FaceLandmarker? = null
     @Volatile private var closed = false
 
+    // Sticky driver state: center (cx, cy) of the last-selected driver's bounding box in
+    // normalized coordinates. Used by [pickDriverIndex] to bias selection toward temporal
+    // continuity. `-1f` means "no prior driver" — first frame or after NO_FACE. Reset in
+    // [close] and whenever face detection is lost. Only accessed from the analysis executor.
+    private var lastDriverCenterX: Float = -1f
+    private var lastDriverCenterY: Float = -1f
+
     // OpenCV reusable Mats — allocate once per analyzer, reuse per frame so CLAHE stays
     // ~10ms instead of the ~25ms it costs when Mats are reallocated. All access is on the
     // single-threaded analysis executor, so no synchronization needed.
@@ -82,7 +89,7 @@ class FaceAnalyzer(
                 val options = FaceLandmarker.FaceLandmarkerOptions.builder()
                     .setBaseOptions(baseOptions)
                     .setRunningMode(RunningMode.IMAGE)
-                    .setNumFaces(1)
+                    .setNumFaces(MAX_FACES)
                     .setOutputFaceBlendshapes(true)
                     .setOutputFacialTransformationMatrixes(true)
                     .setMinFaceDetectionConfidence(0.5f)
@@ -128,16 +135,30 @@ class FaceAnalyzer(
 
             val result = landmarker.detect(mpImage, imageOptions)
             val blendshapesOpt = result.faceBlendshapes()
-
             val landmarksList = result.faceLandmarks()
+            val matrixesOpt = result.facialTransformationMatrixes()
 
-            // Head orientation from MediaPipe's facial transformation matrix (yaw/pitch in degrees,
-            // frontal = 0). Used downstream to pause PERCLOS accumulation when the driver looks
-            // away — natural in a vehicle (mirrors, dashboard) but was being scored as fatigue.
-            val (headYaw, headPitch) = extractYawPitchDegrees(result.facialTransformationMatrixes())
+            // Multi-face driver selection: compute bboxes over stable central landmarks for
+            // every returned face and pick the driver via area (with sticky bias). MediaPipe
+            // orders results by detection confidence, not by size — the largest face is the
+            // one closest to the front camera, which in a vehicle is always the driver.
+            val bboxes = landmarksList.mapNotNull { computeBoundingBox(it) }
+            val selectedIndex = if (bboxes.size == landmarksList.size) {
+                pickDriverIndex(bboxes, lastDriverCenterX, lastDriverCenterY)
+            } else {
+                // At least one face had too few landmarks — treat all faces as unusable to
+                // avoid indexing mismatch across the three parallel collections.
+                -1
+            }
 
-            val metrics = if (blendshapesOpt.isPresent && blendshapesOpt.get().isNotEmpty()) {
-                val shapes = blendshapesOpt.get()[0]
+            // Guard against inconsistent sizes across the three parallel collections.
+            val blendshapesSize = if (blendshapesOpt.isPresent) blendshapesOpt.get().size else 0
+            val matrixesSize = if (matrixesOpt.isPresent) matrixesOpt.get().size else 0
+            val maxUsableIndex = minOf(blendshapesSize, landmarksList.size, matrixesSize) - 1
+            val safeIndex = if (selectedIndex in 0..maxUsableIndex) selectedIndex else -1
+
+            val metrics = if (safeIndex >= 0) {
+                val shapes = blendshapesOpt.get()[safeIndex]
                 val eyeBlinkLeft  = shapes.find { it.categoryName() == "eyeBlinkLeft"  }?.score()
                 val eyeBlinkRight = shapes.find { it.categoryName() == "eyeBlinkRight" }?.score()
                 val jawOpen       = shapes.find { it.categoryName() == "jawOpen"       }?.score() ?: 0f
@@ -146,6 +167,8 @@ class FaceAnalyzer(
                 // rather than silently defaulting to 0f (which would be read as "eyes wide open")
                 if (eyeBlinkLeft == null || eyeBlinkRight == null) {
                     Log.w("FaceAnalyzer", "Eye blendshapes missing — discarding frame as NO_FACE")
+                    lastDriverCenterX = -1f
+                    lastDriverCenterY = -1f
                     createNoFaceMetrics(frameLuminance)
                 } else {
                     val blendLeft  = (1f - eyeBlinkLeft).coerceIn(0f, 1f)
@@ -154,14 +177,19 @@ class FaceAnalyzer(
                     // EAR (Eye Aspect Ratio) uses geometric eyelid distances — immune to lens
                     // reflections that inflate blendshape-based openness for glasses wearers.
                     // We take the minimum of blendshape and EAR so reflections never hide a blink.
-                    val (earLeft, earRight) = if (landmarksList.isNotEmpty()) {
-                        calculateEarOpenness(landmarksList[0])
-                    } else Pair(blendLeft, blendRight)
-
+                    val (earLeft, earRight) = calculateEarOpenness(landmarksList[safeIndex])
                     val finalLeft  = minOf(blendLeft, earLeft)
                     val finalRight = minOf(blendRight, earRight)
 
-                    Log.d("FaceAnalyzer", "blinkL=$eyeBlinkLeft blinkR=$eyeBlinkRight jawOpen=$jawOpen earL=$earLeft earR=$earRight yaw=$headYaw pitch=$headPitch")
+                    // Head orientation from MediaPipe's transformation matrix for the selected face.
+                    val (headYaw, headPitch) = extractYawPitchDegrees(matrixesOpt, safeIndex)
+
+                    // Update sticky-driver state from the selected bbox center.
+                    val bbox = bboxes[safeIndex]
+                    lastDriverCenterX = (bbox[0] + bbox[2]) / 2f
+                    lastDriverCenterY = (bbox[1] + bbox[3]) / 2f
+
+                    Log.d("FaceAnalyzer", "faces=${landmarksList.size} selected=$safeIndex blinkL=$eyeBlinkLeft blinkR=$eyeBlinkRight jawOpen=$jawOpen earL=$earLeft earR=$earRight yaw=$headYaw pitch=$headPitch")
                     FatigueMetrics(
                         leftEyeOpenProbability  = finalLeft,
                         rightEyeOpenProbability = finalRight,
@@ -174,6 +202,10 @@ class FaceAnalyzer(
                     )
                 }
             } else {
+                // No usable face detected — reset sticky state so the next detection starts
+                // a fresh tracking session instead of biasing toward a stale center.
+                lastDriverCenterX = -1f
+                lastDriverCenterY = -1f
                 createNoFaceMetrics(frameLuminance)
             }
             onMetricsAvailable(metrics)
@@ -187,6 +219,8 @@ class FaceAnalyzer(
 
     fun close() {
         closed = true
+        lastDriverCenterX = -1f
+        lastDriverCenterY = -1f
         try {
             faceLandmarker?.close()
         } catch (e: Exception) {
@@ -288,25 +322,12 @@ class FaceAnalyzer(
      */
     private fun extractYawPitchDegrees(
         matrixesOpt: java.util.Optional<List<FloatArray>>,
+        index: Int,
     ): Pair<Float, Float> {
         if (!matrixesOpt.isPresent) return Pair(0f, 0f)
         val list = matrixesOpt.get()
-        if (list.isEmpty()) return Pair(0f, 0f)
-        val m = list[0]
-        if (m.size < 16) return Pair(0f, 0f)
-
-        val r02 = m[8]
-        val r12 = m[9]
-        val r22 = m[10]
-
-        val pitchRad = asin((-r12).coerceIn(-1f, 1f))
-        val yawRad = atan2(r02, r22)
-
-        val radToDeg = 180.0 / Math.PI
-        return Pair(
-            (yawRad * radToDeg).toFloat(),
-            (pitchRad * radToDeg).toFloat(),
-        )
+        if (index < 0 || index >= list.size) return Pair(0f, 0f)
+        return decomposeYawPitchFromMatrix(list[index])
     }
 
     companion object {
@@ -318,6 +339,26 @@ class FaceAnalyzer(
 
         // 8×8 grid ≈ 64 samples — enough for a stable mean, cheap enough to run per frame.
         private const val LUMINANCE_SAMPLES_PER_AXIS = 8
+
+        // Maximum faces MediaPipe returns per frame. Covers driver + up to 3 back-seat
+        // passengers. Chosen over 2 because MediaPipe orders results by detection confidence
+        // (not by size); with only 2 slots a driver with poorer lighting/angle than 2 rear
+        // passengers could be excluded from the returned set. With 4 slots the driver is
+        // reliably present and the bbox-area heuristic selects them correctly.
+        const val MAX_FACES = 4
+
+        // Sticky-driver bias: on multi-face frames, prefer a candidate whose bbox center is
+        // within this distance (normalized coordinates) of the previously-selected driver AND
+        // whose area is at least STICKY_AREA_RATIO of the largest candidate. Prevents flicker
+        // when a passenger leaning forward momentarily equalizes area with the driver.
+        const val STICKY_CENTER_TOLERANCE = 0.15f
+        const val STICKY_AREA_RATIO = 0.70f
+
+        // Central stable landmarks used to compute the driver-selection bounding box: nose (1),
+        // forehead (10), chin (152), left cheek (234), right cheek (454). Using only these 5
+        // instead of all 478 makes the bbox more robust to oblique angles where face periphery
+        // is foreshortened (which would artificially shrink the total bbox).
+        private val BBOX_LANDMARK_INDICES = intArrayOf(1, 10, 152, 234, 454)
 
         // CLAHE tuning — moderate boost; higher clipLimit exaggerates noise in DARK.
         private const val CLAHE_CLIP_LIMIT = 2.0
@@ -344,6 +385,119 @@ class FaceAnalyzer(
          * JVM so we mask with 0xFF. `rowStride` may exceed [width] on some devices due to
          * hardware padding — always index via `y * rowStride + x`, not `y * width + x`.
          */
+        /**
+         * Bounding box [minX, minY, maxX, maxY] over the stable central landmarks
+         * ([BBOX_LANDMARK_INDICES]). Returns null if the landmark list is too short to
+         * safely index — caller should treat that face as absent.
+         */
+        internal fun computeBoundingBox(landmarks: List<NormalizedLandmark>): FloatArray? {
+            if (landmarks.size < 478) return null
+            var minX = Float.POSITIVE_INFINITY
+            var minY = Float.POSITIVE_INFINITY
+            var maxX = Float.NEGATIVE_INFINITY
+            var maxY = Float.NEGATIVE_INFINITY
+            for (idx in BBOX_LANDMARK_INDICES) {
+                val lm = landmarks[idx]
+                val x = lm.x()
+                val y = lm.y()
+                if (x < minX) minX = x
+                if (y < minY) minY = y
+                if (x > maxX) maxX = x
+                if (y > maxY) maxY = y
+            }
+            return floatArrayOf(minX, minY, maxX, maxY)
+        }
+
+        internal fun bboxArea(bbox: FloatArray): Float {
+            val w = (bbox[2] - bbox[0]).coerceAtLeast(0f)
+            val h = (bbox[3] - bbox[1]).coerceAtLeast(0f)
+            return w * h
+        }
+
+        /**
+         * Returns the index of the largest-area bbox, or -1 if the list is empty. On ties
+         * the earliest index wins (deterministic).
+         */
+        internal fun pickLargestFaceIndex(bboxes: List<FloatArray>): Int {
+            if (bboxes.isEmpty()) return -1
+            var bestIdx = 0
+            var bestArea = bboxArea(bboxes[0])
+            for (i in 1 until bboxes.size) {
+                val a = bboxArea(bboxes[i])
+                if (a > bestArea) {
+                    bestArea = a
+                    bestIdx = i
+                }
+            }
+            return bestIdx
+        }
+
+        /**
+         * Picks the driver's face index applying (1) largest-area heuristic, then (2) a
+         * sticky bias: if a candidate's center is within [STICKY_CENTER_TOLERANCE] of the
+         * previous driver center AND its area is ≥ [STICKY_AREA_RATIO] of the largest, prefer
+         * it over the raw largest. Pass negative sticky coords (`-1f`) when no prior driver
+         * has been selected (first frame or after NO_FACE).
+         *
+         * Returns -1 if [bboxes] is empty.
+         */
+        internal fun pickDriverIndex(
+            bboxes: List<FloatArray>,
+            lastCenterX: Float,
+            lastCenterY: Float,
+        ): Int {
+            if (bboxes.isEmpty()) return -1
+            val largestIdx = pickLargestFaceIndex(bboxes)
+            if (bboxes.size == 1) return largestIdx
+            if (lastCenterX < 0f || lastCenterY < 0f) return largestIdx
+
+            // Sticky bias: among candidates whose area is at least [STICKY_AREA_RATIO] of the
+            // largest, pick the one whose center is closest to the previous driver's center —
+            // provided that closest candidate is within [STICKY_CENTER_TOLERANCE]. If nobody
+            // qualifies (all too far or too small), fall back to the largest.
+            //
+            // This handles the flicker case correctly: when a passenger leans forward and
+            // briefly overtakes the driver's bbox area, both faces are candidates but the
+            // driver's center is closer to the sticky center → driver wins, no swap.
+            val largestArea = bboxArea(bboxes[largestIdx])
+            val minAcceptableArea = largestArea * STICKY_AREA_RATIO
+            var bestIdx = largestIdx
+            var bestDist = Float.POSITIVE_INFINITY
+            for (i in bboxes.indices) {
+                if (bboxArea(bboxes[i]) < minAcceptableArea) continue
+                val bbox = bboxes[i]
+                val cx = (bbox[0] + bbox[2]) / 2f
+                val cy = (bbox[1] + bbox[3]) / 2f
+                val dx = cx - lastCenterX
+                val dy = cy - lastCenterY
+                val dist = kotlin.math.sqrt(dx * dx + dy * dy)
+                if (dist < bestDist) {
+                    bestDist = dist
+                    bestIdx = i
+                }
+            }
+            return if (bestDist <= STICKY_CENTER_TOLERANCE) bestIdx else largestIdx
+        }
+
+        /**
+         * Pure math extracted from [extractYawPitchDegrees]: decomposes a MediaPipe 4×4
+         * column-major transformation matrix into (yaw, pitch) degrees using Y-X-Z Euler.
+         * Returns (0, 0) for arrays shorter than 16 so callers don't need extra guards.
+         */
+        internal fun decomposeYawPitchFromMatrix(m: FloatArray): Pair<Float, Float> {
+            if (m.size < 16) return Pair(0f, 0f)
+            val r02 = m[8]
+            val r12 = m[9]
+            val r22 = m[10]
+            val pitchRad = asin((-r12).coerceIn(-1f, 1f))
+            val yawRad = atan2(r02, r22)
+            val radToDeg = 180.0 / Math.PI
+            return Pair(
+                (yawRad * radToDeg).toFloat(),
+                (pitchRad * radToDeg).toFloat(),
+            )
+        }
+
         internal fun computeYPlaneMean(
             buffer: ByteBuffer,
             rowStride: Int,
