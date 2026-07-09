@@ -60,6 +60,14 @@ class LightingMonitor {
     }
 
     private fun classify(current: LightingMode, lux: Float?, y: Float): LightingMode {
+        // Sensor sanity: an environment where the frame Y plane is truly < 2/255 does not
+        // exist in practice (even a "dark night" cabin with a phone camera lands at Y ≈ 10-30
+        // due to AE lifting). A frame Y pinned at 0 means the sensor is covered, the driver
+        // is broken, or the camera has failed — not that the ambient is dark. Refusing to
+        // enter DARK on implausible signals prevents the FSM from getting stuck in a mode
+        // it can never exit (exit needs y ≥ EXIT_DARK_Y = 45, unreachable if y = 0 forever).
+        if (y < SENSOR_MIN_PLAUSIBLE_Y) return LightingMode.NORMAL
+
         // Asymmetric policy — "hard to enter, easy to exit":
         //   Entry: BOTH signals must agree (AND) — prevents false positives from front-camera
         //   AE producing frame Y 60-90 in normally-lit rooms; lux corroborates as ambient truth.
@@ -110,5 +118,11 @@ class LightingMonitor {
 
         const val DWELL_MS_DARKER = 2000L
         const val DWELL_MS_LIGHTER = 3000L
+
+        // Frame Y values below this indicate a broken/covered sensor rather than a real
+        // dark environment (real cabins land at Y ≈ 10-30 even at night due to AE lift).
+        // Treated as implausible → classifier defaults to NORMAL so the FSM can't get
+        // pinned in DARK when the exit gate (Y ≥ 45) is permanently unreachable.
+        const val SENSOR_MIN_PLAUSIBLE_Y = 2f
     }
 }

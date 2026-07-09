@@ -155,6 +155,44 @@ class LightingMonitorTest {
     }
 
     @Test
+    fun `implausible Y sensor pinned at zero keeps NORMAL not DARK`() {
+        // Regression: on devices where the camera Y-plane reports 0 permanently (covered
+        // lens, sensor driver bug), the FSM used to enter DARK on the first frame and
+        // never exit — exit needs Y ≥ EXIT_DARK_Y=45, unreachable if Y is stuck at 0.
+        // The sensor-sanity guard rejects Y < SENSOR_MIN_PLAUSIBLE_Y before classification.
+        var t = 0L
+        repeat(30) {
+            monitor.update(lux = null, frameLuminance = 0f, tsMs = t)
+            t += 1000L
+        }
+        assertEquals(LightingMode.NORMAL, monitor.mode.value)
+    }
+
+    @Test
+    fun `implausible Y sensor allows escape from stale DARK`() {
+        // Get into DARK via genuine signals, then simulate the sensor going bad (Y=0
+        // permanently). The mode should fall back to NORMAL after the lighter dwell.
+        monitor.update(lux = 2f, frameLuminance = 20f, tsMs = 0L)
+        monitor.update(lux = 2f, frameLuminance = 20f, tsMs = 2100L)
+        assertEquals(LightingMode.DARK, monitor.mode.value)
+
+        // Y drops to 0 (implausible) — classifier returns NORMAL. Target becomes NORMAL,
+        // dwell lighter = 3000ms (from DARK the first hop is DARK → LOW_LIGHT via classify,
+        // but implausible signals short-circuit to NORMAL directly).
+        var t = 3000L
+        repeat(10) {
+            monitor.update(lux = 2f, frameLuminance = 0f, tsMs = t)
+            t += 500L
+        }
+        // After ≥ 3s of implausible signal, mode should have exited DARK.
+        assertEquals(
+            "Implausible Y should let the FSM escape DARK",
+            LightingMode.NORMAL,
+            monitor.mode.value,
+        )
+    }
+
+    @Test
     fun `reset clears state`() {
         monitor.update(null, 20f, tsMs = 0L)
         monitor.update(null, 20f, tsMs = 2100L)
