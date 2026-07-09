@@ -72,4 +72,37 @@ class SessionRepositoryTest {
         val folder = repository.getSessionFolder("test-session")
         assertEquals(File(testBaseDir, "test-session").absolutePath, folder.absolutePath)
     }
+
+    @Test
+    fun `getSessions skips corrupted summary files without crashing`() = runBlocking {
+        // Regression: previously readText() outside try/catch meant a single corrupt file
+        // would crash the entire HistoryScreen load. Now malformed folders are logged and
+        // skipped; valid folders still surface.
+        val goodSession = File(testBaseDir, "good-session").apply { mkdirs() }
+        val badSession = File(testBaseDir, "bad-session").apply { mkdirs() }
+
+        val goodJson = """
+            {
+              "sessionId": "good-session",
+              "startTime": 1000,
+              "endTime": 2000,
+              "durationMs": 1000,
+              "totalAlerts": 0,
+              "dominantState": "NORMAL",
+              "averageScore": 5.0,
+              "peakScore": 10.0
+            }
+        """.trimIndent()
+        File(goodSession, "session_summary.json").writeText(goodJson)
+
+        // Truncated/corrupt JSON — parseSummaryJson already returns null on parse errors,
+        // but readText itself could throw on truly invalid bytes; simulate the common case
+        // of a truncated file that IS valid UTF-8 but not valid JSON.
+        File(badSession, "session_summary.json").writeText("{ this is not valid json")
+
+        val sessions = repository.getSessions()
+
+        assertEquals(1, sessions.size)
+        assertEquals("good-session", sessions[0].sessionId)
+    }
 }

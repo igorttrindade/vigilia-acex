@@ -45,12 +45,16 @@ class SessionRepository private constructor(
 
         val summaries = mutableListOf<SessionSummary>()
         baseDir.listFiles()?.forEach { sessionFolder ->
-            if (sessionFolder.isDirectory) {
-                val summaryFile = File(sessionFolder, "session_summary.json")
-                if (summaryFile.exists()) {
-                    val json = summaryFile.readText()
-                    parseSummaryJson(json)?.let { summaries.add(it) }
-                }
+            if (!sessionFolder.isDirectory) return@forEach
+            val summaryFile = File(sessionFolder, "session_summary.json")
+            if (!summaryFile.exists()) return@forEach
+            // Guard against unreadable files (corrupted UTF-8, truncated after a process
+            // kill mid-write, permission denied). Without this, a single bad folder crashes
+            // the entire HistoryScreen load.
+            try {
+                parseSummaryJson(summaryFile.readText())?.let { summaries.add(it) }
+            } catch (e: Exception) {
+                Log.w("SessionRepository", "Skipping unreadable session ${sessionFolder.name}", e)
             }
         }
 
