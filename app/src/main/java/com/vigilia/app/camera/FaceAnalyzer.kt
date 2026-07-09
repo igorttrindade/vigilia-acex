@@ -51,6 +51,13 @@ class FaceAnalyzer(
     @Volatile private var faceLandmarker: FaceLandmarker? = null
     @Volatile private var closed = false
 
+    // Serializes `analyze()` and `close()` so the native MediaPipe handle cannot be
+    // released while a detect() call is in progress on the analysis executor. The
+    // executor is single-threaded, so contention here is only between the executor
+    // and Main during teardown — Main blocks for at most one detect (~10-30 ms), which
+    // is acceptable at Stop.
+    private val landmarkerLock = Any()
+
     // Sticky driver state: center (cx, cy) of the last-selected driver's bounding box in
     // normalized coordinates. Used by [pickDriverIndex] to bias selection toward temporal
     // continuity. `-1f` means "no prior driver" — first frame or after NO_FACE. Reset in
@@ -104,13 +111,35 @@ class FaceAnalyzer(
     }
 
     override fun analyze(imageProxy: ImageProxy) {
-        val landmarker = faceLandmarker
-        if (landmarker == null) {
+        // Fast-path check outside the lock — if the analyzer is already closed we don't
+        // need to serialize with close() at all.
+        if (closed || faceLandmarker == null) {
             onMetricsAvailable(createNoFaceMetrics())
             imageProxy.close()
             return
         }
         try {
+            // Serialize with close(): once we're inside this block, close() cannot free
+            // the native landmarker until we're done. Re-read faceLandmarker inside the
+            // lock because it may have been nulled by close() between the fast-path check
+            // and here.
+            synchronized(landmarkerLock) {
+                val landmarker = faceLandmarker
+                if (landmarker == null) {
+                    onMetricsAvailable(createNoFaceMetrics())
+                    return@synchronized
+                }
+                runAnalysis(imageProxy, landmarker)
+            }
+        } catch (e: Exception) {
+            Log.e("FaceAnalyzer", "Detection failed", e)
+            onMetricsAvailable(createNoFaceMetrics(0f))
+        } finally {
+            imageProxy.close()
+        }
+    }
+
+    private fun runAnalysis(imageProxy: ImageProxy, landmarker: FaceLandmarker) {
             // Read frame luminance from the Y plane before toBitmap() runs — toBitmap may
             // consume buffer positions on some devices. Cheap (~0.3ms) and feeds LightingMonitor.
             val yPlane = imageProxy.planes[0]
@@ -208,23 +237,41 @@ class FaceAnalyzer(
                 lastDriverCenterY = -1f
                 createNoFaceMetrics(frameLuminance)
             }
-            onMetricsAvailable(metrics)
-        } catch (e: Exception) {
-            Log.e("FaceAnalyzer", "Detection failed", e)
-            onMetricsAvailable(createNoFaceMetrics(0f))
-        } finally {
-            imageProxy.close()
-        }
+        onMetricsAvailable(metrics)
     }
 
     fun close() {
-        closed = true
-        lastDriverCenterX = -1f
-        lastDriverCenterY = -1f
-        try {
-            faceLandmarker?.close()
-        } catch (e: Exception) {
-            Log.w("FaceAnalyzer", "Close failed", e)
+        // Serialize with any in-flight analyze() so the native MediaPipe handle can't be
+        // freed while detect() is still running. Main blocks here for at most one detect
+        // (~10-30 ms). Also releases OpenCV Mats to avoid native heap growth across
+        // Start/Stop cycles.
+        synchronized(landmarkerLock) {
+            closed = true
+            lastDriverCenterX = -1f
+            lastDriverCenterY = -1f
+            val lm = faceLandmarker
+            faceLandmarker = null
+            try {
+                lm?.close()
+            } catch (e: Exception) {
+                Log.w("FaceAnalyzer", "FaceLandmarker close failed", e)
+            }
+            // Release lazily-initialized OpenCV Mats. If enhance() was never called these
+            // properties haven't been materialized, but touching them triggers the lazy
+            // init which we then immediately release — cost is negligible.
+            if (opencvReady) {
+                try {
+                    rgbaMat.release()
+                    rgbMat.release()
+                    yuvMat.release()
+                    yuvChannels.forEach { it.release() }
+                    yuvChannels.clear()
+                    gammaLutLow.release()
+                    gammaLutDark.release()
+                } catch (e: Throwable) {
+                    Log.w("FaceAnalyzer", "OpenCV Mat release failed", e)
+                }
+            }
         }
     }
 
