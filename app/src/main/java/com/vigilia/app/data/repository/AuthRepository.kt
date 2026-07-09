@@ -4,10 +4,32 @@ import com.vigilia.app.data.remote.SupabaseClient
 import com.vigilia.app.data.remote.dto.ProfileDto
 import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.providers.builtin.Email
+import io.github.jan.supabase.auth.status.SessionStatus
 import io.github.jan.supabase.postgrest.from
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 
 /** Handles Supabase email/password authentication. */
 class AuthRepository {
+
+    /**
+     * True when Supabase-kt has an authenticated session ready. Consumed by the password
+     * reset flow: [SupabaseClient.client.handleDeeplinks] parses the token asynchronously,
+     * so the reset UI must gate its "save new password" button on this flag or the user
+     * can submit before the session is ready and burn the single-use token silently.
+     */
+    val isSessionReady: StateFlow<Boolean> = SupabaseClient.client.auth.sessionStatus
+        .map { it is SessionStatus.Authenticated }
+        .stateIn(
+            scope = CoroutineScope(Dispatchers.Default + SupervisorJob()),
+            started = SharingStarted.Eagerly,
+            initialValue = SupabaseClient.client.auth.currentSessionOrNull() != null,
+        )
 
     /** Signs in with email and password. */
     suspend fun signIn(email: String, password: String): Result<Unit> = runCatching {

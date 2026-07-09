@@ -3,6 +3,8 @@ package com.vigilia.app.ui.auth
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.vigilia.app.data.repository.AuthRepository
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -24,6 +26,10 @@ data class AuthUiState(
     // Reset password (after deep link)
     val newPasswordError: String? = null,
     val resetComplete: Boolean = false,
+    // True once Supabase has finished processing the deep-link token and the session is
+    // authenticated. Gates the "save new password" button so the user can't submit before
+    // the async handshake completes (which would burn the single-use token silently).
+    val isResetSessionReady: Boolean = false,
     // Sign-up requires email confirmation before accessing the app
     val registrationPendingConfirmation: Boolean = false,
 )
@@ -34,9 +40,25 @@ class AuthViewModel : ViewModel() {
     private val authRepository = AuthRepository()
 
     private val _uiState = MutableStateFlow(
-        AuthUiState(isLoggedIn = authRepository.isLoggedIn())
+        AuthUiState(
+            isLoggedIn = authRepository.isLoggedIn(),
+            isResetSessionReady = authRepository.isSessionReady.value,
+        )
     )
     val uiState: StateFlow<AuthUiState> = _uiState.asStateFlow()
+
+    private var resetSessionTimeoutJob: Job? = null
+
+    init {
+        // Mirror Supabase's session status into the UI state so the password-reset flow can
+        // gate its submit button on it. All other flows are unaffected: sessionStatus is
+        // Authenticated after a normal sign-in so the flag is true immediately.
+        viewModelScope.launch {
+            authRepository.isSessionReady.collect { ready ->
+                _uiState.update { it.copy(isResetSessionReady = ready) }
+            }
+        }
+    }
 
     fun onEmailChanged(email: String) {
         _uiState.update { it.copy(email = email, emailError = null) }
@@ -89,6 +111,10 @@ class AuthViewModel : ViewModel() {
         message.contains("Email not found", ignoreCase = true) ||
         message.contains("user not found", ignoreCase = true) ->
             "E-mail não encontrado"
+        message.contains("expired", ignoreCase = true) ||
+        message.contains("invalid token", ignoreCase = true) ||
+        message.contains("otp_expired", ignoreCase = true) ->
+            "Link de redefinição expirado. Solicite um novo e-mail."
         message.contains("network", ignoreCase = true) ||
         message.contains("Unable to resolve host", ignoreCase = true) ->
             "Sem conexão. Verifique sua internet."
@@ -165,6 +191,29 @@ class AuthViewModel : ViewModel() {
         _uiState.update { it.copy(resetEmailSent = false, resetComplete = false, newPasswordError = null) }
     }
 
+    /**
+     * Called by [ResetPasswordScreen] on entry. Starts a defensive timeout — if Supabase
+     * hasn't established the session from the deep-link token after 10 s, we surface a
+     * "link expired" message so the user isn't stuck staring at a disabled button forever.
+     */
+    fun enterResetPasswordFlow() {
+        resetSessionTimeoutJob?.cancel()
+        resetSessionTimeoutJob = viewModelScope.launch {
+            delay(RESET_SESSION_TIMEOUT_MS)
+            if (!_uiState.value.isResetSessionReady) {
+                _uiState.update {
+                    it.copy(errorMessage = "Link de redefinição expirado. Solicite um novo e-mail.")
+                }
+            }
+        }
+    }
+
+    /** Called by [ResetPasswordScreen] on dispose. Cancels the pending timeout. */
+    fun leaveResetPasswordFlow() {
+        resetSessionTimeoutJob?.cancel()
+        resetSessionTimeoutJob = null
+    }
+
     fun signOut() {
         viewModelScope.launch {
             authRepository.signOut()
@@ -185,5 +234,12 @@ class AuthViewModel : ViewModel() {
                 registrationPendingConfirmation = false,
             )
         }
+    }
+
+    private companion object {
+        // How long the reset screen waits for Supabase to establish the session before it
+        // gives up and surfaces "link expired". Handles the case where the deep-link token
+        // is corrupt or already-consumed and the session status never flips to Authenticated.
+        const val RESET_SESSION_TIMEOUT_MS = 10_000L
     }
 }

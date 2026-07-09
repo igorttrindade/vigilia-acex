@@ -36,6 +36,14 @@ fun ResetPasswordScreen(
         }
     }
 
+    // Start the reset-flow timeout on entry; cancel it on dispose so it doesn't fire from
+    // another screen. If the session isn't ready after 10 s, the ViewModel surfaces a
+    // "link expired" error instead of leaving the user staring at a disabled button.
+    DisposableEffect(Unit) {
+        viewModel.enterResetPasswordFlow()
+        onDispose { viewModel.leaveResetPasswordFlow() }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -107,9 +115,24 @@ fun ResetPasswordScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
+        // Hint shown while the deep-link handshake is still in flight. Prevents the user
+        // from submitting a password against a not-yet-authenticated Supabase client, which
+        // would burn the single-use reset token silently and produce a generic error.
+        if (!uiState.isResetSessionReady && uiState.errorMessage == null) {
+            Text(
+                text = "Preparando sessão de redefinição…",
+                color = TextSecondary,
+                fontSize = 13.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp),
+            )
+        }
+
         Button(
             onClick = { viewModel.updatePassword(newPassword) },
-            enabled = !uiState.isLoading,
+            enabled = !uiState.isLoading && uiState.isResetSessionReady,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(56.dp),
