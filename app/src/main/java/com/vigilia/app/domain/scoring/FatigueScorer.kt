@@ -106,9 +106,21 @@ class FatigueScorer(
 
         // Grace period before NO_FACE resets the state machine — absorbs brief detection glitches
         const val NO_FACE_GRACE_MS = 500L
+        // LOW_LIGHT sees more MediaPipe detection dropouts than NORMAL — not as many as DARK.
+        // Interpolated between NORMAL (500) and DARK (1500).
+        const val NO_FACE_GRACE_MS_LOW_LIGHT = 1_000L
         // In DARK, MediaPipe drops face-detection more often. Widen grace so a run of failed
         // frames caused by low-light noise doesn't clear buffers on every headlight glare.
         const val NO_FACE_GRACE_MS_DARK = 1_500L
+
+        // PERCLOS closure debounce: require this many consecutive raw-closed reads before a
+        // frame counts as "closed" in the PERCLOS window. Filters MediaPipe blendshape jitter
+        // (±0.05 openness noise) that was inflating baseline PERCLOS to 30-60 % in wide-awake
+        // users when the front-camera AE masked a subjectively-dark ambient (Y=65-83, so the
+        // LightingMonitor stayed in NORMAL). Real blinks (≥3 frames) and fatigue closures
+        // (dozens of frames) still register — only single-frame flickers are rejected.
+        // Strictly less than BLINK_MIN_CLOSED_FRAMES so 3-frame blinks still contribute here.
+        const val PERCLOS_MIN_CLOSED_FRAMES = 2
 
         // Calibration
         const val CALIBRATION_DURATION_MS = 7_000L
@@ -170,6 +182,13 @@ class FatigueScorer(
     private var blinkStartTime: Long? = null
     private var monitoringStartMs = -1L
 
+    // Debounce state for PERCLOS closure classification. `count` tracks consecutive raw-closed
+    // reads; `lastClassified` holds the current debounced closed/open verdict. A frame flips
+    // to closed only after PERCLOS_MIN_CLOSED_FRAMES consecutive raw-closed reads; a single
+    // raw-open frame breaks the streak and resets both.
+    private var perclosConsecutiveClosedCount = 0
+    private var perclosLastClassifiedClosed = false
+
     private var yawnStartTime: Long? = null
     private var yawnGraceStart: Long? = null
     private var lastYawnDetectedTime: Long? = null
@@ -215,6 +234,8 @@ class FatigueScorer(
                 transitionAccumulatedMs = 0L
                 transitionLastCheckMs = 0L
                 perclosWindow.clear()
+                perclosConsecutiveClosedCount = 0
+                perclosLastClassifiedClosed = false
                 blinkTimestamps.clear()
                 smoothedScore = 0f
                 calibrationEligibleSinceMs = -1L
@@ -315,12 +336,32 @@ class FatigueScorer(
                 metrics.headPitchDegrees > LOOK_AWAY_PITCH_DEGREES_UP ||
                 metrics.headPitchDegrees < -LOOK_AWAY_PITCH_DEGREES_DOWN
 
-        val isEyeClosed = metrics.leftEyeOpenProbability < eyeClosedThreshold ||
+        val rawEyeClosed = metrics.leftEyeOpenProbability < eyeClosedThreshold ||
                 metrics.rightEyeOpenProbability < eyeClosedThreshold
 
-        // 1. PERCLOS Calculation — skip the addLast when looking away, but always drain by age.
+        // Debounce: reject single-frame jitter from MediaPipe blendshapes. The classifier
+        // flips to closed only after PERCLOS_MIN_CLOSED_FRAMES consecutive raw-closed reads;
+        // one raw-open frame resets the streak. Real closures (blinks ≥3 frames, fatigue
+        // closures much longer) pass unchanged with 1-frame delay (~33 ms).
+        val debouncedEyeClosed = if (rawEyeClosed) {
+            perclosConsecutiveClosedCount++
+            if (perclosConsecutiveClosedCount >= PERCLOS_MIN_CLOSED_FRAMES) {
+                perclosLastClassifiedClosed = true
+            }
+            perclosLastClassifiedClosed
+        } else {
+            perclosConsecutiveClosedCount = 0
+            perclosLastClassifiedClosed = false
+            false
+        }
+
+        // 1. PERCLOS Calculation — skip the addLast when looking away (and reset debounce
+        // so a returning frame starts a fresh streak), but always drain by age.
         if (!isLookingAway) {
-            perclosWindow.addLast(FrameRecord(currentTime, isEyeClosed))
+            perclosWindow.addLast(FrameRecord(currentTime, debouncedEyeClosed))
+        } else {
+            perclosConsecutiveClosedCount = 0
+            perclosLastClassifiedClosed = false
         }
         while (perclosWindow.isNotEmpty() && currentTime - perclosWindow.first().timestampMs > PERCLOS_WINDOW_MS) {
             perclosWindow.removeFirst()
@@ -434,6 +475,8 @@ class FatigueScorer(
 
     fun reset() {
         perclosWindow.clear()
+        perclosConsecutiveClosedCount = 0
+        perclosLastClassifiedClosed = false
         blinkTimestamps.clear()
         isBlinking = false
         yawnStartTime = null
@@ -480,6 +523,11 @@ class FatigueScorer(
         for ((ts, openness) in calibrationSamples) {
             perclosWindow.addLast(FrameRecord(ts, openness < eyeClosedThreshold))
         }
+        // Reset debounce so the first monitoring frame starts a fresh streak. Calibration
+        // frames are gated to be open, so the counter is naturally 0, but resetting is
+        // defensive in case the stabilization gate ever admits a closed frame in the future.
+        perclosConsecutiveClosedCount = 0
+        perclosLastClassifiedClosed = false
         // Anchor blink warmup at the start of calibration so BLINK_MIN_OBSERVATION_MS (30s)
         // ticks in parallel with data collection — otherwise blink deviation only starts
         // penalizing 30 s after calibration ends, which is unnecessarily conservative.
@@ -573,6 +621,9 @@ class FatigueScorer(
         )
     }
 
-    private fun currentNoFaceGraceMs(): Long =
-        if (lightingModeProvider() == LightingMode.DARK) NO_FACE_GRACE_MS_DARK else NO_FACE_GRACE_MS
+    private fun currentNoFaceGraceMs(): Long = when (lightingModeProvider()) {
+        LightingMode.DARK -> NO_FACE_GRACE_MS_DARK
+        LightingMode.LOW_LIGHT -> NO_FACE_GRACE_MS_LOW_LIGHT
+        else -> NO_FACE_GRACE_MS
+    }
 }

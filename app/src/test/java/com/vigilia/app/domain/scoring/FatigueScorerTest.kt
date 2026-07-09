@@ -2,6 +2,7 @@ package com.vigilia.app.domain.scoring
 
 import com.vigilia.app.domain.model.FatigueMetrics
 import com.vigilia.app.domain.model.FatigueState
+import com.vigilia.app.lighting.LightingMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -552,6 +553,163 @@ class FatigueScorerTest {
         assertFalse(
             "Single yawn on a WARNING baseline must not reach FATIGUED (yawn is tier-2 signal)",
             reachedFatigued,
+        )
+    }
+
+    @Test
+    fun `single frame closure noise does not accumulate into perclos`() {
+        // Regression for the reported field bug: user parado no PC em ambiente subjetivamente
+        // escuro (Y=65-83, então LightingMonitor permanece em NORMAL) via score subir para
+        // WARNING em <1min. CSV mostrou eyeOpenness alternando entre 0.9 e 0.0/0.5 em snapshots
+        // consecutivos — jitter de single-frame da blendshape do MediaPipe. Sem debounce esses
+        // frames isolados eram contados como closed no PERCLOS. Com debounce, apenas closures
+        // com pelo menos 2 frames consecutivos contam.
+        var t = 1000L
+        // 900 frames alternando open/closed a 30 fps ≈ 30 s. Cada frame closed é isolado.
+        repeat(450) {
+            scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, true, t)); t += 33
+            scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, t)); t += 33
+        }
+        val finalAssessment = scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, true, t))
+        assertTrue(
+            "Single-frame noise must not inflate perclos (was ${finalAssessment.perclos})",
+            finalAssessment.perclos < 0.05f,
+        )
+        assertTrue(
+            "Score must stay low with debounced noise (was ${finalAssessment.score})",
+            finalAssessment.score < 5f,
+        )
+        assertEquals(FatigueState.NORMAL, finalAssessment.fatigueState)
+    }
+
+    @Test
+    fun `two consecutive closed frames still count toward perclos`() {
+        // Verifies the debounce doesn't over-suppress: paired closures (2+ consecutive frames)
+        // must register. Pattern: 1 open, 2 closed, 1 open — 4-frame block repeated. After
+        // debounce, frame 2 of each closed pair confirms (frame 1 stayed open due to gate).
+        // So ~1 in 4 frames records closed → perclos ≈ 25 %.
+        var t = 1000L
+        repeat(200) {
+            scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, true, t)); t += 33
+            scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, t)); t += 33
+            scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, t)); t += 33
+            scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, true, t)); t += 33
+        }
+        val a = scorer.processFrame(FatigueMetrics(0.8f, 0.8f, 0.1f, true, t))
+        assertTrue(
+            "Debounce must still let 2-frame closures through — perclos should be measurable (was ${a.perclos})",
+            a.perclos > 0.15f,
+        )
+    }
+
+    @Test
+    fun `real blink pattern of three closed frames still counted in perclos`() {
+        // Real blinks last 100–400 ms = 3–12 frames at 30 fps — well above the 2-frame
+        // debounce threshold. A blink pattern (17 open, 3 closed) repeated should still show
+        // measurable PERCLOS from the confirmed closed portion of each blink.
+        var t = 1000L
+        // Blink every ~666 ms → 30 s of data. Frame 1 of each blink stays "unconfirmed" (false);
+        // frames 2 and 3 record closed. So 2 of every 20 frames = 10 % perclos expected.
+        repeat(30) {
+            repeat(17) { scorer.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t)); t += 33 }
+            repeat(3) { scorer.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, t)); t += 33 }
+        }
+        val a = scorer.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t))
+        assertTrue(
+            "Real blinks (3 frames closed) must still contribute to perclos (was ${a.perclos})",
+            a.perclos > 0.05f && a.perclos < 0.20f,
+        )
+    }
+
+    @Test
+    fun `sustained closure still reaches WARNING with debounce`() {
+        // Regression: the debounce delays confirmation by exactly 1 frame (~33 ms) — negligible
+        // against the 3 s NORMAL→WARNING sustain gate. Real fatigue (many seconds of closed
+        // eyes) must still promote to WARNING.
+        var t = 1000L
+        var lastState = FatigueState.NORMAL
+        // 15 s of continuous closed frames — 150 frames at 100 ms intervals.
+        repeat(150) {
+            lastState = scorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, t)).fatigueState
+            t += 100
+        }
+        assertEquals(
+            "Sustained closure must still reach WARNING with debounce active",
+            FatigueState.WARNING,
+            lastState,
+        )
+    }
+
+    @Test
+    fun `look away resets debounce counter`() {
+        // Prevents a "carry-over" bug: 1 raw-closed frame just before a look-away, then 1
+        // raw-closed frame on return should NOT confirm as closed (counter must reset during
+        // look-away so the streak restarts fresh).
+        var t = 1000L
+        // 1 closed frontal frame — counter=1, not confirmed yet.
+        scorer.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, t)); t += 100
+        // Look-away frame with closed eyes — must reset counter without recording anything
+        // in perclosWindow.
+        scorer.processFrame(
+            FatigueMetrics(0.05f, 0.05f, 0.1f, true, t, headYawDegrees = 40f),
+        ); t += 100
+        // Return to frontal with 1 closed frame — should be counter=1 (fresh streak), not
+        // confirmed yet.
+        val returning = scorer.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, t))
+        // Perclos should still be 0 because no 2-consecutive-frame streak has ever completed.
+        assertTrue(
+            "Look-away must reset debounce; returning single closed frame must not confirm (perclos was ${returning.perclos})",
+            returning.perclos < 0.01f,
+        )
+    }
+
+    @Test
+    fun `LOW_LIGHT grace uses 1000 ms window`() {
+        // Verifies the widened NO_FACE grace for LOW_LIGHT mode: 1000 ms (interpolated
+        // between NORMAL=500 and DARK=1500). Grace is measured from the first no-face
+        // frame — a 900 ms dropout should NOT flip to NO_FACE; a 1100 ms dropout should.
+        val lowLightScorer = FatigueScorer(
+            calibrationEnabled = false,
+            lightingModeProvider = { LightingMode.LOW_LIGHT },
+        )
+        // Prime with a detected frame so state is NORMAL.
+        lowLightScorer.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, 1000L))
+
+        // First no-face frame at t=1100 starts the grace timer (duration=0).
+        val start = lowLightScorer.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, false, 1100L))
+        assertFalse(
+            "Grace just started, must not yet be NO_FACE (state=${start.fatigueState})",
+            start.fatigueState == FatigueState.NO_FACE,
+        )
+
+        // At t=2000, duration=900 ms — under 1000 ms LOW_LIGHT grace.
+        val under = lowLightScorer.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, false, 2000L))
+        assertFalse(
+            "At 900 ms no-face in LOW_LIGHT, must not yet be NO_FACE (state=${under.fatigueState})",
+            under.fatigueState == FatigueState.NO_FACE,
+        )
+
+        // At t=2200, duration=1100 ms — over the 1000 ms LOW_LIGHT grace.
+        val over = lowLightScorer.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, false, 2200L))
+        assertEquals(
+            "At 1100 ms no-face in LOW_LIGHT, grace should have expired",
+            FatigueState.NO_FACE,
+            over.fatigueState,
+        )
+    }
+
+    @Test
+    fun `debounce state cleared across reset`() {
+        // A raw-closed frame primed just before reset() must not carry a partial streak into
+        // the next session — reset() must clear both count and last-classified.
+        scorer.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, 1000L))
+        scorer.reset()
+
+        // 1 closed frame post-reset — should be counter=1 (fresh), not confirmed.
+        val afterReset = scorer.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, 2000L))
+        assertTrue(
+            "Reset must clear debounce state so single closed frame post-reset stays unconfirmed (perclos was ${afterReset.perclos})",
+            afterReset.perclos < 0.01f,
         )
     }
 
