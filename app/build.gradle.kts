@@ -29,6 +29,27 @@ android {
         buildConfigField("String", "SUPABASE_KEY", "\"${localProperties["SUPABASE_KEY"]}\"")
     }
 
+    signingConfigs {
+        // Release keystore: gerada localmente com keytool, guardada fora do repo
+        // (~/vigilia-release.jks). Credenciais vêm de local.properties (gitignored).
+        // Se qualquer campo estiver ausente, o build release falha loudmente em vez
+        // de silenciosamente cair pra debug signing — força configuração consciente.
+        create("release") {
+            val keystorePath = localProperties["RELEASE_KEYSTORE_PATH"] as? String
+            val keystorePass = localProperties["RELEASE_KEYSTORE_PASSWORD"] as? String
+            val alias = localProperties["RELEASE_KEY_ALIAS"] as? String
+            val keyPass = localProperties["RELEASE_KEY_PASSWORD"] as? String
+            if (!keystorePath.isNullOrBlank() && !keystorePass.isNullOrBlank() &&
+                !alias.isNullOrBlank() && !keyPass.isNullOrBlank()
+            ) {
+                storeFile = file(keystorePath)
+                storePassword = keystorePass
+                keyAlias = alias
+                keyPassword = keyPass
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -37,9 +58,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // Distribuição é APK direto (side-load), não Play Store. Debug signing
-            // é a assinatura oficial do release — não é workaround temporário.
-            signingConfig = signingConfigs.getByName("debug")
+            // Distribuição é APK direto (side-load), não Play Store. Release keystore
+            // gerada localmente com keytool, credenciais em local.properties (gitignored).
+            // Ver "History of decisions" em CLAUDE.md pra setup e backup do .jks.
+            signingConfig = signingConfigs.getByName("release")
         }
     }
     compileOptions {
