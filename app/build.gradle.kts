@@ -31,11 +31,15 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // Distribuição é APK direto (side-load), não Play Store. Debug signing
+            // é a assinatura oficial do release — não é workaround temporário.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
     compileOptions {
