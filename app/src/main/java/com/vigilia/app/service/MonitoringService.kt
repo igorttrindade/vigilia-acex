@@ -189,12 +189,14 @@ class MonitoringService : Service(), LifecycleOwner {
         startSensorUpdates()
 
         serviceScope.launch {
+            var startupCompleted = false
             try {
                 acquireWakeLock()
                 preloadRingtone()
                 sessionId = telemetryWriter.startSession()
                 lifecycleRegistry.currentState = Lifecycle.State.RESUMED
                 isProcessRunning = true
+                startupCompleted = true
 
                 cameraManager.startCamera(
                     this@MonitoringService,
@@ -221,9 +223,33 @@ class MonitoringService : Service(), LifecycleOwner {
                 }
             } catch (e: Exception) {
                 Log.e("MonitoringService", "Failed to start monitoring", e)
-                stopMonitoring()
+                if (startupCompleted) {
+                    // isProcessRunning was set, so stopMonitoring() does the full teardown.
+                    stopMonitoring()
+                } else {
+                    // Rollback partial state: stopMonitoring() would early-return because
+                    // isProcessRunning is still false, leaving WakeLock/foreground/sensors
+                    // dangling. Release explicitly in reverse order of acquisition.
+                    rollbackPartialStart()
+                }
             }
         }
+    }
+
+    /**
+     * Undo side effects of a failed [startMonitoring] before [isProcessRunning] flipped true.
+     * Mirrors the teardown order of [stopMonitoring] for the resources that were actually
+     * touched during startup (foreground, sensors, location acquired synchronously; wakelock
+     * and ringtone acquired inside the coroutine's try block).
+     */
+    private fun rollbackPartialStart() {
+        try { stopAlert() } catch (_: Exception) {}
+        try { releaseWakeLock() } catch (_: Exception) {}
+        try { stopLocationUpdates() } catch (_: Exception) {}
+        try { stopSensorUpdates() } catch (_: Exception) {}
+        currentAssessment.value = null
+        try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
+        stopSelf()
     }
 
     private fun stopMonitoring() {
