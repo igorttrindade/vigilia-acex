@@ -56,7 +56,7 @@
 }
 
 # =============================================================================
-# MediaPipe Tasks Vision
+# MediaPipe Tasks Vision + full Google runtime transitive graph
 # =============================================================================
 # Native code + reflection to load the .task model asset. Keep the whole
 # tasks-vision + protobuf tree.
@@ -65,6 +65,26 @@
 -keep class com.google.protobuf.** { *; }
 -dontwarn com.google.mediapipe.**
 -dontwarn com.google.protobuf.**
+# MediaPipe pulls Guava + Google Flogger + errorprone transitively. Flogger
+# walks the stack to identify the caller class; when Guava/Flogger get
+# obfuscated the caller class name no longer matches the expected pattern
+# and Graph.<clinit> throws "no caller found on the stack for: <obfuscated>".
+# Symptom: FaceLandmarker init fails with ExceptionInInitializerError chained
+# to IllegalStateException in Graph static init. Keeping the whole com.google
+# subtree is broader than ideal but the transitive graph is deep and hard to
+# pin down without another iteration cycle.
+-keep class com.google.common.** { *; }
+-keep class com.google.flogger.** { *; }
+-keep class com.google.errorprone.annotations.** { *; }
+-keep class com.google.j2objc.annotations.** { *; }
+-keep class com.google.thirdparty.** { *; }
+-dontwarn com.google.common.**
+-dontwarn com.google.flogger.**
+-dontwarn com.google.errorprone.**
+-dontwarn com.google.j2objc.**
+-dontwarn com.google.thirdparty.**
+-dontwarn javax.annotation.**
+-dontwarn sun.misc.**
 
 # =============================================================================
 # OpenCV
@@ -75,12 +95,25 @@
 -dontwarn org.opencv.**
 
 # =============================================================================
-# Ktor (HTTP client used by Supabase)
+# Ktor (HTTP client used by Supabase) + related kotlinx modules
 # =============================================================================
 -keep class io.ktor.** { *; }
 -keep interface io.ktor.** { *; }
 -dontwarn io.ktor.**
+# Ktor depends on kotlinx-io for streaming. Keep the API classes so R8 doesn't
+# strip stream adapters that Ktor loads reflectively.
+-keep class kotlinx.io.** { *; }
+-dontwarn kotlinx.io.**
+# Coroutines internals are complex and Ktor exposes them across module boundaries.
+-keep class kotlinx.coroutines.** { *; }
 -dontwarn kotlinx.coroutines.**
+# Kotlinx datetime — Supabase-kt uses Instant/LocalDate serializers for timestamp
+# columns in sessions / telemetry_records. Must survive minification.
+-keep class kotlinx.datetime.** { *; }
+-dontwarn kotlinx.datetime.**
+# kotlinx-serialization-json exposes internal reflection paths that R8 flags.
+-keep class kotlinx.serialization.json.** { *; }
+-dontwarn kotlinx.serialization.**
 # Kotlin reflection metadata is only needed if the app calls kotlin-reflect
 # directly (we don't) — silencing warnings that come from Ktor's optional
 # reflection paths.
@@ -106,6 +139,25 @@
 -keep class * extends androidx.work.Worker { *; }
 -keep class * extends androidx.work.ListenableWorker { *; }
 -keep class * extends androidx.work.CoroutineWorker { *; }
+# WorkManager depends on Room internally (WorkDatabase). Room generates *_Impl
+# classes at compile time that are instantiated reflectively via
+# Class.getDeclaredConstructor() — the default constructor gets stripped by R8
+# unless we keep it explicitly. Symptom without this rule: app crashes on
+# launch with NoSuchMethodException: androidx.work.impl.WorkDatabase_Impl.<init>[]
+-keep class androidx.work.impl.** { *; }
+-keep class androidx.room.** { *; }
+-keep class * extends androidx.room.RoomDatabase { *; }
+-keep class **_Impl { *; }
+-keepclassmembers class **_Impl {
+    <init>(...);
+}
+-dontwarn androidx.room.**
+
+# =============================================================================
+# AndroidX Startup (ContentProvider-based library initialization)
+# =============================================================================
+-keep class androidx.startup.** { *; }
+-keep class * implements androidx.startup.Initializer { *; }
 
 # =============================================================================
 # App build config
