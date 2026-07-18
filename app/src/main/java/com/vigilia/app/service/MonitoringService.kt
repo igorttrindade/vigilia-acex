@@ -413,6 +413,9 @@ class MonitoringService : Service(), LifecycleOwner {
     private fun triggerAlert() {
         try {
             alertJob?.cancel()
+            // Count the alert per trigger, not per telemetry row that catches the tone
+            // playing — see TelemetryWriter.recordAlert() for rationale.
+            telemetryWriter.recordAlert()
             alertJob = serviceScope.launch {
                 toneGenerator?.startTone(ToneGenerator.TONE_CDMA_HIGH_PBX_SLS, 200)
                 delay(350L)

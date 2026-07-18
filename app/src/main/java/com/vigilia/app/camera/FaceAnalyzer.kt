@@ -223,6 +223,7 @@ class FaceAnalyzer(
                 } else {
                     val blendLeft  = (1f - eyeBlinkLeft).coerceIn(0f, 1f)
                     val blendRight = (1f - eyeBlinkRight).coerceIn(0f, 1f)
+                    val blendAvg   = (blendLeft + blendRight) / 2f
 
                     // EAR (Eye Aspect Ratio) uses geometric eyelid distances — immune to lens
                     // reflections that inflate blendshape-based openness for glasses wearers.
@@ -249,6 +250,7 @@ class FaceAnalyzer(
                         headYawDegrees          = headYaw,
                         headPitchDegrees        = headPitch,
                         frameLuminance          = frameLuminance,
+                        avgBlendshapeOpen       = blendAvg,
                     )
                 }
             } else {

@@ -732,4 +732,160 @@ class FatigueScorerTest {
         assertEquals(0f, assessment.score, 0.01f)
         assertEquals(FatigueState.NORMAL, assessment.fatigueState)
     }
+
+    @Test
+    fun `look-away release does not spike score`() {
+        val s = FatigueScorer(calibrationEnabled = false)
+        var t = 1000L
+
+        // Drive score up with a mix of closed and open frames until ~30
+        while (s.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, t)).score < 25f) {
+            t += 100
+        }
+        val scoreBeforeLookAway = s.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, t)).score
+        t += 100
+
+        // 20s of sustained look-away (yaw = 40°). Every frame must return the frozen score.
+        repeat(200) {
+            val a = s.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, t, headYawDegrees = 40f))
+            assertEquals(
+                "Score must stay frozen during look-away (frame at t=$t, got ${a.score})",
+                scoreBeforeLookAway, a.score, 0.001f,
+            )
+            t += 100
+        }
+
+        // First frame back to forward-facing with eyes OPEN — must not spike.
+        val scoreOnReturn = s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t)).score
+        assertTrue(
+            "Score on look-away release should not spike (before=$scoreBeforeLookAway, on return=$scoreOnReturn)",
+            scoreOnReturn <= scoreBeforeLookAway + 5f,
+        )
+    }
+
+    @Test
+    fun `brief look-away is transparent to score`() {
+        val s = FatigueScorer(calibrationEnabled = false)
+        var t = 1000L
+
+        // 10s of open-eye frames to establish a low baseline
+        repeat(100) {
+            s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t))
+            t += 100
+        }
+        val baseline = s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t)).score
+
+        // 2s of brief look-away
+        repeat(20) {
+            t += 100
+            s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t, headYawDegrees = 40f))
+        }
+
+        // 2s back forward
+        var lastScore = baseline
+        repeat(20) {
+            t += 100
+            lastScore = s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t)).score
+        }
+
+        assertTrue(
+            "Brief glance should be transparent (baseline=$baseline, after=$lastScore)",
+            kotlin.math.abs(lastScore - baseline) < 3f,
+        )
+    }
+
+    @Test
+    fun `perclos buffer count is preserved across look-away`() {
+        val s = FatigueScorer(calibrationEnabled = false)
+        var t = 1000L
+
+        // Fill the perclos window with 15s of frames (well below the 30s cap)
+        repeat(150) {
+            s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t))
+            t += 100
+        }
+
+        // Look away for 20s — buffer should NOT drain during this period.
+        repeat(200) {
+            s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t, headYawDegrees = 40f))
+            t += 100
+        }
+
+        // Return forward and immediately capture the assessment. If the buffer had drained,
+        // the first return frame would sit in an empty buffer → perclos = 0/1 = 0. If preserved,
+        // perclos reflects the pre-look-away composition (~0 closed / 150+ open ≈ 0).
+        val onReturn = s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t))
+        assertEquals("perclos should stay at 0 across the shift (open frames only)", 0f, onReturn.perclos, 0.01f)
+
+        // More importantly: score must not swing because of the buffer state after shift.
+        val postReturn = s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t + 100))
+        assertTrue("score stays low after look-away (open-eyed baseline), got ${postReturn.score}", postReturn.score < 15f)
+    }
+
+    @Test
+    fun `narrow-eyed user - calibration baseline anchors on blendshape not on min-with-EAR`() {
+        // Simulates a user whose eyes are anatomically small: MediaPipe blendshapes report
+        // eyes as fully open (blendshape openness = 0.90) but EAR is systematically low,
+        // dragging the min-based openness down to 0.55. Under the previous behavior,
+        // calibration would use the 0.55 baseline → threshold = 0.55 × 0.30 = 0.165 →
+        // clamped up to EYE_CLOSED_MIN = 0.18. In runtime with openness fluctuating between
+        // 0.20–0.55, many "open" frames would fall below 0.18 and inflate PERCLOS.
+        //
+        // With blendshape-based calibration, baseline = 0.90 → threshold = 0.27. Runtime
+        // frames at 0.55 stay comfortably above threshold → PERCLOS stays low → score stays low.
+        val narrowEyed = FatigueScorer(calibrationEnabled = true)
+        var t = 1000L
+
+        // Feed 8s of "eyes open" narrow-eyed frames: min-based openness 0.55, blendshape 0.90
+        // (>800ms stabilization + 7s collection + margin).
+        repeat(80) {
+            narrowEyed.processFrame(
+                FatigueMetrics(
+                    leftEyeOpenProbability = 0.55f,
+                    rightEyeOpenProbability = 0.55f,
+                    mouthOpenProbability = 0.1f,
+                    isFaceDetected = true,
+                    timestampMs = t,
+                    avgBlendshapeOpen = 0.90f,
+                )
+            )
+            t += 100
+        }
+
+        // Post-calibration state must be NORMAL (calibration finished)
+        val postCalib = narrowEyed.processFrame(
+            FatigueMetrics(
+                leftEyeOpenProbability = 0.55f,
+                rightEyeOpenProbability = 0.55f,
+                mouthOpenProbability = 0.1f,
+                isFaceDetected = true,
+                timestampMs = t,
+                avgBlendshapeOpen = 0.90f,
+            )
+        )
+        assertEquals("Calibration should have finished", FatigueState.NORMAL, postCalib.fatigueState)
+
+        // Feed 5s more of the same eyes-open narrow frames — score must NOT climb because
+        // the threshold (calibrated from blendshape p90) is now around 0.27, well below
+        // the 0.55 runtime openness.
+        var lastScore = postCalib.score
+        repeat(50) {
+            t += 100
+            lastScore = narrowEyed.processFrame(
+                FatigueMetrics(
+                    leftEyeOpenProbability = 0.55f,
+                    rightEyeOpenProbability = 0.55f,
+                    mouthOpenProbability = 0.1f,
+                    isFaceDetected = true,
+                    timestampMs = t,
+                    avgBlendshapeOpen = 0.90f,
+                )
+            ).score
+        }
+
+        assertTrue(
+            "Narrow-eyed user with eyes open should NOT accumulate score (got $lastScore, expected < 15)",
+            lastScore < 15f,
+        )
+    }
 }

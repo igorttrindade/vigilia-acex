@@ -99,13 +99,13 @@ class TelemetryWriterTest {
     fun `session creation and record writing works`() = runBlocking {
         val sessionId = telemetryWriter.startSession()
         assertTrue("SessionId should not be empty", sessionId.isNotEmpty())
-        
+
         val sessionDir = File(testBaseDir, sessionId)
         assertTrue("Session directory should exist", sessionDir.exists())
-        
+
         val csvFile = File(sessionDir, "session.csv")
         assertTrue("CSV file should exist", csvFile.exists())
-        
+
         val record = TelemetryRecord(
             sessionId = sessionId,
             timestamp = 1000L,
@@ -117,20 +117,67 @@ class TelemetryWriterTest {
             isFaceDetected = true,
             alertActive = true,
         )
-        
+
         telemetryWriter.writeRecord(record)
-        
+        telemetryWriter.recordAlert()  // counter is trigger-based; alertActive on the row alone doesn't count anymore
+
         val summary = telemetryWriter.stopSession()
         assertEquals(sessionId, summary.sessionId)
         assertEquals(45.0f, summary.averageScore, 0.01f)
         assertEquals(1, summary.totalAlerts)
         assertTrue("startTime should be a real wall-clock timestamp", summary.startTime > 0L)
         assertTrue("endTime should be >= startTime", summary.endTime >= summary.startTime)
-        
+
         val summaryFile = File(sessionDir, "session_summary.json")
         assertTrue("Summary file should exist", summaryFile.exists())
         val json = summaryFile.readText()
         assertTrue("JSON should contain sessionId", json.contains(sessionId))
         assertTrue("JSON should contain dominantState", json.contains("WARNING"))
+    }
+
+    @Test
+    fun `recordAlert increments totalAlerts once per call regardless of alertActive samples`() = runBlocking {
+        val sessionId = telemetryWriter.startSession()
+
+        // Simulate 5 alarms fired during the session. The two writeRecords with
+        // alertActive=true would previously have inflated the counter — now they don't.
+        telemetryWriter.recordAlert()
+        telemetryWriter.recordAlert()
+        telemetryWriter.writeRecord(
+            TelemetryRecord(
+                sessionId = sessionId, timestamp = 1000L, score = 55.0f,
+                state = com.vigilia.app.domain.model.FatigueState.WARNING,
+                eyeOpenness = 0.4f, blinkRate = 12.0f, isYawning = false,
+                isFaceDetected = true, alertActive = true,
+            )
+        )
+        telemetryWriter.recordAlert()
+        telemetryWriter.writeRecord(
+            TelemetryRecord(
+                sessionId = sessionId, timestamp = 2000L, score = 60.0f,
+                state = com.vigilia.app.domain.model.FatigueState.WARNING,
+                eyeOpenness = 0.35f, blinkRate = 12.0f, isYawning = false,
+                isFaceDetected = true, alertActive = true,
+            )
+        )
+        telemetryWriter.recordAlert()
+        telemetryWriter.recordAlert()
+
+        val summary = telemetryWriter.stopSession()
+        assertEquals("5 recordAlert() calls should count as 5 alerts", 5, summary.totalAlerts)
+    }
+
+    @Test
+    fun `recordAlert with no active session is a no-op`() = runBlocking {
+        // No startSession() called
+        telemetryWriter.recordAlert()
+        telemetryWriter.recordAlert()
+
+        // Start a session AFTER the stray recordAlert calls
+        telemetryWriter.startSession()
+        telemetryWriter.recordAlert()
+        val summary = telemetryWriter.stopSession()
+
+        assertEquals("Only alerts fired during an active session should count", 1, summary.totalAlerts)
     }
 }

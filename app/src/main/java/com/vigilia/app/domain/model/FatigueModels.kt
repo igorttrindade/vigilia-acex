@@ -16,6 +16,13 @@ data class FatigueMetrics(
     val headPitchDegrees: Float = 0f,
     // Mean Y-channel luminance of the frame, [0..255]. Feeds LightingMonitor.
     val frameLuminance: Float = 0f,
+    // Mean of the two eyes' openness derived from MediaPipe blendshapes ONLY (no min with
+    // EAR). Used as the calibration baseline because it's scale-invariant across eye
+    // shapes. The eye-open probabilities above still use min(blendshape, EAR) — that's
+    // fine for runtime detection where EAR protects against glasses reflections, but
+    // deflates the baseline for narrow-eyed users because EAR is normalized against a
+    // fixed reference. Default 0 so old callers/tests still work.
+    val avgBlendshapeOpen: Float = 0f,
 )
 
 data class FatigueAssessment(

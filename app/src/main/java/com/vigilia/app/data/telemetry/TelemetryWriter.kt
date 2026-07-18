@@ -13,6 +13,7 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileWriter
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Responsible for persisting session data to local storage.
@@ -45,7 +46,9 @@ class TelemetryWriter private constructor(
 
     // Session metrics tracked in memory
     private var startTimeMillis: Long = 0
-    private var totalAlerts: Int = 0
+    // AtomicInteger so recordAlert() can be called from any thread (frame callback lives
+    // on the analysis executor, not on Main). No mutex needed for a monotonic counter.
+    private val totalAlerts = AtomicInteger(0)
     private var scoreSum: Double = 0.0
     private var recordCount: Long = 0
     private var peakScore: Float = 0f
@@ -90,7 +93,7 @@ class TelemetryWriter private constructor(
 
         // Reset metrics
         startTimeMillis = System.currentTimeMillis()
-        totalAlerts = 0
+        totalAlerts.set(0)
         scoreSum = 0.0
         recordCount = 0
         peakScore = 0f
@@ -143,10 +146,11 @@ class TelemetryWriter private constructor(
                     writer.append(row)
                 }
 
-                // Update metrics for summary
-                if (record.alertActive) {
-                    totalAlerts++
-                }
+                // Update metrics for summary. `totalAlerts` is NOT touched here — see
+                // `recordAlert()`. The old logic incremented when `record.alertActive` was
+                // true, but that field is only true during the ~550ms the alarm tone plays,
+                // so it undercounted alerts by roughly (2000 - 550) / 2000 = 72.5 % on
+                // average.
                 scoreSum += record.score
                 recordCount++
                 if (record.score > peakScore) {
@@ -166,6 +170,17 @@ class TelemetryWriter private constructor(
 
     /** Number of rows persisted so far in the active session. Read from any thread. */
     fun currentRecordCount(): Long = recordCount
+
+    /**
+     * Register that an alert was fired. Called from MonitoringService.triggerAlert() on
+     * every trigger — one call per audible alarm. Idempotent no-op when no session is
+     * active. Prefer this over relying on `TelemetryRecord.alertActive` for counting
+     * because that field only reflects whether the tone was playing at the exact instant
+     * a 2s telemetry row was written — a heavy sampling bias against short alerts.
+     */
+    fun recordAlert() {
+        if (currentSessionId != null) totalAlerts.incrementAndGet()
+    }
 
     /**
      * Stops the session, calculates summary metrics, and writes session_summary.json.
@@ -189,7 +204,7 @@ class TelemetryWriter private constructor(
             startTime = startTimeMillis,
             endTime = endTimeMillis,
             durationMs = durationMs,
-            totalAlerts = totalAlerts,
+            totalAlerts = totalAlerts.get(),
             dominantState = dominantState,
             averageScore = avgScore,
             peakScore = peakScore
