@@ -111,31 +111,52 @@ class FaceAnalyzer(
     }
 
     override fun analyze(imageProxy: ImageProxy) {
-        // Fast-path check outside the lock — if the analyzer is already closed we don't
-        // need to serialize with close() at all.
-        if (closed || faceLandmarker == null) {
-            onMetricsAvailable(createNoFaceMetrics())
-            imageProxy.close()
-            return
-        }
         try {
-            // Serialize with close(): once we're inside this block, close() cannot free
-            // the native landmarker until we're done. Re-read faceLandmarker inside the
-            // lock because it may have been nulled by close() between the fast-path check
-            // and here.
-            synchronized(landmarkerLock) {
-                val landmarker = faceLandmarker
-                if (landmarker == null) {
-                    onMetricsAvailable(createNoFaceMetrics())
-                    return@synchronized
-                }
-                runAnalysis(imageProxy, landmarker)
+            // Fast-path check outside the lock — if the analyzer is already closed we don't
+            // need to serialize with close() at all.
+            if (closed || faceLandmarker == null) {
+                emitMetricsSafely(createNoFaceMetrics())
+                return
             }
-        } catch (e: Exception) {
-            Log.e("FaceAnalyzer", "Detection failed", e)
-            onMetricsAvailable(createNoFaceMetrics(0f))
+            try {
+                // Serialize with close(): once we're inside this block, close() cannot free
+                // the native landmarker until we're done. Re-read faceLandmarker inside the
+                // lock because it may have been nulled by close() between the fast-path check
+                // and here.
+                synchronized(landmarkerLock) {
+                    val landmarker = faceLandmarker
+                    if (landmarker == null) {
+                        emitMetricsSafely(createNoFaceMetrics())
+                        return@synchronized
+                    }
+                    runAnalysis(imageProxy, landmarker)
+                }
+            } catch (e: Exception) {
+                Log.e("FaceAnalyzer", "Detection failed", e)
+                emitMetricsSafely(createNoFaceMetrics(0f))
+            }
         } finally {
-            imageProxy.close()
+            // Always release the ImageProxy — leaking one exhausts CameraX's buffer pool and
+            // stalls the entire analysis stream after ~4-8 frames. Wrapping the close() in
+            // try/catch is belt-and-suspenders: close() itself can throw on some devices.
+            try { imageProxy.close() } catch (t: Throwable) {
+                Log.w("FaceAnalyzer", "imageProxy.close() failed", t)
+            }
+        }
+    }
+
+    /**
+     * Emit metrics to the consumer with a safety catch. If the callback lambda (in
+     * MonitoringService's frame loop) ever throws, the exception must NOT propagate to the
+     * analysis executor thread — a single-threaded executor that dies here silently stops
+     * the entire monitoring pipeline until the app is restarted. This is defense-in-depth
+     * on top of MonitoringService.startCamera's own callback try/catch.
+     */
+    private fun emitMetricsSafely(metrics: com.vigilia.app.domain.model.FatigueMetrics) {
+        try {
+            onMetricsAvailable(metrics)
+        } catch (t: Throwable) {
+            Log.e("FaceAnalyzer", "onMetricsAvailable callback threw", t)
         }
     }
 

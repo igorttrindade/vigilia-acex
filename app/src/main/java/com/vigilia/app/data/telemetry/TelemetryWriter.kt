@@ -154,11 +154,18 @@ class TelemetryWriter private constructor(
                 }
                 stateCounts[record.state] = stateCounts.getOrDefault(record.state, 0) + 1
 
-            } catch (_: Exception) {
-                // Log error and continue to avoid crashing the session
+            } catch (e: Exception) {
+                Log.e(
+                    "TelemetryWriter",
+                    "writeRecord failed (session=$currentSessionId, row #${recordCount + 1}, state=${record.state}): ${e.message}",
+                    e,
+                )
             }
         }
     }
+
+    /** Number of rows persisted so far in the active session. Read from any thread. */
+    fun currentRecordCount(): Long = recordCount
 
     /**
      * Stops the session, calculates summary metrics, and writes session_summary.json.
@@ -192,6 +199,22 @@ class TelemetryWriter private constructor(
         val summaryFile = File(folder, "session_summary.json")
         val json = buildSummaryJson(summary)
         summaryFile.writeText(json)
+
+        // Health check: compare expected row count vs actual. Telemetry writes every 2s, so
+        // expected ≈ durationMs / 2000. Anything below 90% signals a silent write failure
+        // and warrants investigating logcat for the culprit.
+        val expectedRows = durationMs / 2000L
+        val healthPct = if (expectedRows > 0) (100.0 * recordCount / expectedRows) else 0.0
+        Log.i(
+            "TelemetryWriter",
+            "Session $sessionId finished: duration=${durationMs}ms, expected≈$expectedRows rows, wrote $recordCount (${"%.1f".format(healthPct)}%)",
+        )
+        if (recordCount > 0 && expectedRows > 0 && healthPct < 90.0) {
+            Log.w(
+                "TelemetryWriter",
+                "Session $sessionId had significant telemetry loss — expected $expectedRows rows, only $recordCount persisted",
+            )
+        }
 
         // Reset session state
         currentSessionId = null

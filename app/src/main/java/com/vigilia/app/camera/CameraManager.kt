@@ -103,6 +103,10 @@ class CameraManager(private val context: Context) {
                         cameraSelector,
                         *useCases.toTypedArray(),
                     )
+                    Log.i(
+                        "CameraManager",
+                        "Initial bind: analysis=${currentAnalysis != null}, preview=${currentPreview != null}, camera=${camera != null}",
+                    )
                     // Reapply the last mode after (re)binding — new sessions default to NORMAL
                     // but if the caller has already switched to LOW_LIGHT/DARK we honor it.
                     applyLightingMode(currentLightingMode)
@@ -179,8 +183,9 @@ class CameraManager(private val context: Context) {
         val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
 
         try {
+            Log.i("CameraManager", "updatePreview: unbinding to reattach preview (surface=${surfaceProvider != null})")
             provider.unbindAll()
-            
+
             if (surfaceProvider != null) {
                 currentPreview = Preview.Builder().build().also {
                     it.surfaceProvider = surfaceProvider
@@ -199,10 +204,14 @@ class CameraManager(private val context: Context) {
                     analysis
                 )
             }
+            Log.i(
+                "CameraManager",
+                "updatePreview: rebound with analysis + preview=${currentPreview != null}, camera=${camera != null}",
+            )
             // Preview rebind resets the CaptureSession — reapply Camera2 options.
             applyLightingMode(currentLightingMode)
         } catch (e: Exception) {
-            Log.e("CameraManager", "Preview update failed", e)
+            Log.e("CameraManager", "Preview update failed — analysis is now UNBOUND until next rebind", e)
         }
     }
 

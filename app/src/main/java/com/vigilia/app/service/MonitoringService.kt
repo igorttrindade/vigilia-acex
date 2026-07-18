@@ -66,7 +66,11 @@ class MonitoringService : Service(), LifecycleOwner {
 
     private lateinit var lifecycleRegistry: LifecycleRegistry
     private lateinit var serviceScope: CoroutineScope
-    private val writerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val writerExceptionHandler = CoroutineExceptionHandler { _, t ->
+        Log.e("MonitoringService", "writerScope coroutine failed", t)
+    }
+    private val writerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO + writerExceptionHandler)
+    private var heartbeatJob: Job? = null
 
     private lateinit var cameraManager: CameraManager
     private lateinit var scorer: FatigueScorer
@@ -200,15 +204,25 @@ class MonitoringService : Service(), LifecycleOwner {
                 cameraManager.startCamera(
                     this@MonitoringService,
                     { metrics ->
-                        // Stop processing immediately if flag is false
-                        if (!isProcessRunning) return@startCamera
-
-                        lightingMonitor.update(lastAmbientLux, metrics.frameLuminance, metrics.timestampMs)
-                        val assessment = scorer.processFrame(metrics)
-                        handleAssessment(assessment, metrics)
-                        currentAssessment.value = assessment
+                        // Never let a per-frame exception (native MediaPipe crash, npe in
+                        // the scorer, notification manager error, etc.) propagate to the
+                        // single-threaded analysisExecutor. If it does, the executor dies
+                        // and the entire pipeline halts silently — the exact failure mode
+                        // that dropped the 4h27min session to 200 rows. Catch Throwable to
+                        // include OOM and native Errors from MediaPipe.
+                        try {
+                            if (!isProcessRunning) return@startCamera
+                            lightingMonitor.update(lastAmbientLux, metrics.frameLuminance, metrics.timestampMs)
+                            val assessment = scorer.processFrame(metrics)
+                            handleAssessment(assessment, metrics)
+                            currentAssessment.value = assessment
+                        } catch (t: Throwable) {
+                            Log.e("MonitoringService", "Frame processing failed — keeping pipeline alive", t)
+                        }
                     }
                 )
+
+                startHeartbeat()
 
                 // Observe lighting-mode transitions off the frame loop and hot-apply Camera2
                 // options (EV/FPS/scene). Runs in serviceScope so it's cancelled on stop.
@@ -270,28 +284,51 @@ class MonitoringService : Service(), LifecycleOwner {
         // with no warmup gap, which caused calibration to sample the user mid-tap and
         // inflate the score at the start of the second session.
         cameraManager.stopCamera()
-
-        // Null sessionId synchronously so any handleAssessment already in flight sees it
-        // as null on the `val sId = sessionId ?: return` check and doesn't enqueue a new
-        // writeRecord for a session that's being torn down.
-        sessionId = null
+        heartbeatJob?.cancel()
+        heartbeatJob = null
 
         // Finalize the session summary off the Main thread. TelemetryWriter.writeMutex
         // serializes writeRecord() and stopSession() internally, so any writes still
-        // enqueued in writerScope will run cleanly before or after stopSession(); after
-        // stopSession() the writer's csvFile is null and further writes are no-ops.
-        // If a new session starts before this finalization completes, the guard-rail in
-        // TelemetryWriter.startSession() finalizes the orphan before creating the new one.
+        // enqueued in writerScope will run cleanly before stopSession(); after stopSession()
+        // the writer's csvFile is null and further writes are no-ops.
+        // sessionId is nulled only AFTER stopSession() completes so any handleAssessment
+        // callback still in flight (past its isProcessRunning check) can complete its final
+        // write instead of being silently dropped by the `val sId = sessionId ?: return`
+        // guard. If a new session starts before this finalization completes, the guard-rail
+        // in TelemetryWriter.startSession() finalizes the orphan before creating the new one.
         writerScope.launch {
             try {
                 telemetryWriter.stopSession()
             } catch (e: Exception) {
                 Log.e("MonitoringService", "Stop session failed", e)
+            } finally {
+                sessionId = null
             }
         }
 
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    /**
+     * Emits a heartbeat log every 60s while the session is active. Cheap and invaluable
+     * for debugging silent stalls: if telemetry writes stop mid-session, the heartbeat
+     * keeps running and shows exactly when `rows` stopped incrementing — that pinpoints
+     * whether the failure is in the frame callback, TelemetryWriter, or something else.
+     */
+    private fun startHeartbeat() {
+        heartbeatJob?.cancel()
+        val startMs = System.currentTimeMillis()
+        heartbeatJob = serviceScope.launch {
+            while (isActive) {
+                delay(60_000L)
+                val elapsedSec = (System.currentTimeMillis() - startMs) / 1000
+                Log.i(
+                    "MonitoringService",
+                    "heartbeat session=$sessionId alive=${elapsedSec}s processing=$isProcessRunning rows=${telemetryWriter.currentRecordCount()}",
+                )
+            }
+        }
     }
 
     fun attachPreview(surfaceProvider: Preview.SurfaceProvider) {
