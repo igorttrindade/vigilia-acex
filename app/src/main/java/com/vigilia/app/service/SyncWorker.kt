@@ -30,6 +30,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         private const val WORK_NAME = "vigilia_sync"
 
         fun enqueue(context: Context) {
+            if (com.vigilia.app.BuildConfig.SKIP_SYNC) return
             val request = OneTimeWorkRequestBuilder<SyncWorker>()
                 .setConstraints(Constraints.Builder()
                     .setRequiredNetworkType(NetworkType.CONNECTED)

@@ -100,4 +100,5 @@ class SetupViewModel(application: Application) : AndroidViewModel(application) {
     fun stopMonitoring() {
         ServiceController.stopMonitoring(getApplication())
     }
+
 }

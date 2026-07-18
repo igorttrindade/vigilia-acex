@@ -51,7 +51,11 @@ android {
     }
 
     buildTypes {
+        debug {
+            buildConfigField("boolean", "SKIP_SYNC", "true")
+        }
         release {
+            buildConfigField("boolean", "SKIP_SYNC", "false")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(

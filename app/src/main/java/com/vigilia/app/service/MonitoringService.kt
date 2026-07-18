@@ -12,9 +12,8 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.AudioAttributes
-import android.media.Ringtone
-import android.media.RingtoneManager
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
@@ -80,7 +79,7 @@ class MonitoringService : Service(), LifecycleOwner {
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
-    private var ringtone: Ringtone? = null
+    private var toneGenerator: ToneGenerator? = null
     private var alertJob: Job? = null
     @Volatile private var lastAlertTimeMs = 0L
     @Volatile private var lastLatitude: Double? = null
@@ -192,7 +191,7 @@ class MonitoringService : Service(), LifecycleOwner {
             var startupCompleted = false
             try {
                 acquireWakeLock()
-                preloadRingtone()
+                toneGenerator = ToneGenerator(AudioManager.STREAM_ALARM, 100)
                 sessionId = telemetryWriter.startSession()
                 lifecycleRegistry.currentState = Lifecycle.State.RESUMED
                 isProcessRunning = true
@@ -240,7 +239,7 @@ class MonitoringService : Service(), LifecycleOwner {
      * Undo side effects of a failed [startMonitoring] before [isProcessRunning] flipped true.
      * Mirrors the teardown order of [stopMonitoring] for the resources that were actually
      * touched during startup (foreground, sensors, location acquired synchronously; wakelock
-     * and ringtone acquired inside the coroutine's try block).
+     * and toneGenerator acquired inside the coroutine's try block).
      */
     private fun rollbackPartialStart() {
         try { stopAlert() } catch (_: Exception) {}
@@ -337,7 +336,7 @@ class MonitoringService : Service(), LifecycleOwner {
         if ((currentTime - lastTelemetryWriteTime) >= telemetryIntervalMs) {
             val sId = sessionId ?: return
             lastTelemetryWriteTime = currentTime
-            val alertActive = ringtone?.isPlaying == true
+            val alertActive = alertJob?.isActive == true
             writerScope.launch {
                 telemetryWriter.writeRecord(
                     TelemetryRecord(
@@ -373,42 +372,20 @@ class MonitoringService : Service(), LifecycleOwner {
     }
 
     private fun triggerAlert() {
-        val current = ringtone ?: run {
-            preloadRingtone()
-            ringtone ?: return
-        }
         try {
             alertJob?.cancel()
-            if (current.isPlaying) current.stop()
-            current.play()
+            toneGenerator?.startTone(ToneGenerator.TONE_CDMA_HIGH_PBX_SLS, 200)
             alertJob = serviceScope.launch {
-                delay(3000L)
-                try { current.stop() } catch (_: Exception) {}
+                delay(200L)
+                toneGenerator?.stopTone()
             }
         } catch (e: Exception) { Log.e("MonitoringService", "Alert failed", e) }
     }
 
     private fun stopAlert() {
-        try { ringtone?.stop() } catch (_: Exception) {}
         alertJob?.cancel()
         alertJob = null
-    }
-
-    private fun preloadRingtone() {
-        if (ringtone != null) return
-        try {
-            val alertUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-            ringtone = RingtoneManager.getRingtone(this, alertUri).apply {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    audioAttributes = AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ALARM)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                        .build()
-                }
-            }
-        } catch (e: Exception) {
-            Log.e("MonitoringService", "Ringtone preload failed", e)
-        }
+        try { toneGenerator?.stopTone() } catch (_: Exception) {}
     }
 
     private fun startSensorUpdates() {
@@ -570,7 +547,8 @@ class MonitoringService : Service(), LifecycleOwner {
         sessionId = null
         cameraManager.stopCamera()
         stopAlert()
-        ringtone = null
+        toneGenerator?.release()
+        toneGenerator = null
         releaseWakeLock()
         serviceScope.cancel()
 
