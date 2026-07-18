@@ -24,9 +24,6 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
-        buildConfigField("String", "SUPABASE_URL", "\"${localProperties["SUPABASE_URL"]}\"")
-        buildConfigField("String", "SUPABASE_KEY", "\"${localProperties["SUPABASE_KEY"]}\"")
     }
 
     signingConfigs {
@@ -51,10 +48,24 @@ android {
     }
 
     buildTypes {
+        // Debug builds point at the staging Supabase project so they can freely sync
+        // without polluting prod data. If STAGING creds are absent from local.properties,
+        // debug falls back to PROD creds AND SKIP_SYNC is forced to true as a safety net —
+        // this preserves the "debug never touches prod" invariant even if a dev forgets
+        // to configure staging.
         debug {
-            buildConfigField("boolean", "SKIP_SYNC", "true")
+            val stagingUrl = localProperties["SUPABASE_URL_STAGING"] as? String
+            val stagingKey = localProperties["SUPABASE_KEY_STAGING"] as? String
+            val hasStaging = !stagingUrl.isNullOrBlank() && !stagingKey.isNullOrBlank()
+            val url = if (hasStaging) stagingUrl else localProperties["SUPABASE_URL"]
+            val key = if (hasStaging) stagingKey else localProperties["SUPABASE_KEY"]
+            buildConfigField("String", "SUPABASE_URL", "\"$url\"")
+            buildConfigField("String", "SUPABASE_KEY", "\"$key\"")
+            buildConfigField("boolean", "SKIP_SYNC", if (hasStaging) "false" else "true")
         }
         release {
+            buildConfigField("String", "SUPABASE_URL", "\"${localProperties["SUPABASE_URL"]}\"")
+            buildConfigField("String", "SUPABASE_KEY", "\"${localProperties["SUPABASE_KEY"]}\"")
             buildConfigField("boolean", "SKIP_SYNC", "false")
             isMinifyEnabled = true
             isShrinkResources = true

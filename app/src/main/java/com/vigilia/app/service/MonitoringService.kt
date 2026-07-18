@@ -365,6 +365,8 @@ class MonitoringService : Service(), LifecycleOwner {
                         ambientLightLux = lastAmbientLux,
                         frameLuminance = metrics.frameLuminance,
                         lightingMode = lightingMonitor.mode.value.name,
+                        headYawDegrees = metrics.headYawDegrees,
+                        headPitchDegrees = metrics.headPitchDegrees,
                     )
                 )
             }
@@ -374,8 +376,10 @@ class MonitoringService : Service(), LifecycleOwner {
     private fun triggerAlert() {
         try {
             alertJob?.cancel()
-            toneGenerator?.startTone(ToneGenerator.TONE_CDMA_HIGH_PBX_SLS, 200)
             alertJob = serviceScope.launch {
+                toneGenerator?.startTone(ToneGenerator.TONE_CDMA_HIGH_PBX_SLS, 200)
+                delay(350L)
+                toneGenerator?.startTone(ToneGenerator.TONE_CDMA_HIGH_PBX_SLS, 200)
                 delay(200L)
                 toneGenerator?.stopTone()
             }

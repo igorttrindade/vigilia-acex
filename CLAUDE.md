@@ -278,7 +278,7 @@ Ongoing notification (channel `vigilia_monitoring`, IMPORTANCE_LOW) shows curren
 Session directory: `context.filesDir/sessions/{sessionId}/`
 
 Files:
-- `session.csv` — one row per 2 s window (25 columns): `sessionId,timestamp,score,state,eyeOpenness,blinkRate,isYawning,isFaceDetected,alertActive,latitude,longitude,speed,accelX,accelY,accelZ,gyroX,gyroY,gyroZ,perclos,perclosContribution,blinkContribution,yawnContribution,ambientLightLux,frameLuminance,lightingMode`. Columns 19–22 are FatigueScorer sub-scores exposed for post-hoc diagnosis — they let you decompose the aggregated `score` and calibrate weights from real data. Columns 23–25 are the Fase-1 lighting context (see "Lighting adaptation"). Old CSVs (18 columns from pre-sub-score sessions, 22 columns from pre-Fase-1 sessions) are still parseable by `SyncRepository.parseCsvLine`; missing columns just come back as null.
+- `session.csv` — one row per 2 s window (27 columns): `sessionId,timestamp,score,state,eyeOpenness,blinkRate,isYawning,isFaceDetected,alertActive,latitude,longitude,speed,accelX,accelY,accelZ,gyroX,gyroY,gyroZ,perclos,perclosContribution,blinkContribution,yawnContribution,ambientLightLux,frameLuminance,lightingMode,headYawDegrees,headPitchDegrees`. Columns 19–22 are FatigueScorer sub-scores exposed for post-hoc diagnosis — they let you decompose the aggregated `score` and calibrate weights from real data. Columns 23–25 are the Fase-1 lighting context (see "Lighting adaptation"). Columns 26–27 are head orientation (yaw, pitch, degrees) — persisted so that ambiguous "head down vs. drowsy" cases can be classified from raw telemetry. Old CSVs (18/22/25 columns) are still parseable by `SyncRepository.parseCsvLine`; missing columns just come back as null.
 - `session_summary.json` — aggregated: `sessionId, startTime, endTime, durationMs, totalAlerts, dominantState, averageScore, peakScore`
 - `.synced` — empty marker written by `SyncRepository` after successful upload to Supabase
 
@@ -286,7 +286,11 @@ Files:
 
 ## Supabase integration
 
-- Config: `SUPABASE_URL` and `SUPABASE_KEY` in `local.properties` → injected into `BuildConfig` via `buildConfigField` in `app/build.gradle.kts`. `local.properties` is gitignored. The key used is a `sb_publishable_*` (public by design); **RLS policies on the Supabase side are the actual security boundary** — verified configured for `profiles`, `sessions`, `telemetry_records`.
+- Config: two independent Supabase projects (prod + staging), selected automatically per build type:
+  - **Release** always uses `SUPABASE_URL` / `SUPABASE_KEY` from `local.properties` (prod).
+  - **Debug** uses `SUPABASE_URL_STAGING` / `SUPABASE_KEY_STAGING` when configured; falls back to the prod pair with `SKIP_SYNC=true` when staging keys are absent (safety net so a dev without staging creds still never touches prod).
+  - `SKIP_SYNC` is a `BuildConfig` boolean gating `SyncWorker.enqueue()`. Release always uploads; debug uploads to staging only when staging is configured.
+  - `local.properties` is gitignored. Keys are `sb_publishable_*` (public by design); **RLS policies on the Supabase side are the actual security boundary** — configured for `profiles`, `sessions`, `telemetry_records` on both projects.
 - Client: `SupabaseClient.client` — installs `Auth` (with scheme `vigilia`, host `reset-password`) and `Postgrest`.
 - Auth ops (`AuthRepository`): `signIn`, `signUp` (also upserts `ProfileDto`), `signOut`, `sendPasswordReset`, `updatePassword`, `isLoggedIn`, `refreshAndGetUserId`.
 - Password reset deep link: `vigilia://reset-password` → handled in `MainActivity.onNewIntent()` via `SupabaseClient.client.handleDeeplinks(intent)`; sets a flag consumed by `VigiliaNavGraph` to navigate to `ResetPasswordScreen`.
@@ -442,7 +446,7 @@ adb shell dumpsys power | grep vigilia
 
 - **Multi-face selection**: FaceLandmarker requests up to `MAX_FACES = 4` (driver + up to 3 back-seat passengers). `FaceAnalyzer.pickDriverIndex` picks the driver by bbox area over 5 stable central landmarks (nose/forehead/chin/cheeks), with a sticky bias that prefers the face closest to the previously-selected driver's center provided its area is ≥70% of the largest candidate. Prevents flicker when a passenger leans forward and briefly overtakes the driver's bbox. Edge case not handled: passenger with a face exactly the same size and position as the driver (rare — child on lap, etc.).
 - **compileSdk = 37 vs targetSdk = 34**: intentional — we build against the newest API for future-proofing but target 34 for Play Store compliance.
-- **`isLookingAway` not surfaced to UI**: computed in the scorer but not part of `FatigueAssessment`. Adding a "Olhando ao lado" badge on `MonitoringScreen` is a small future improvement.
+- **`isLookingAway` not surfaced to UI**: computed in the scorer but not part of `FatigueAssessment`. Adding a "Olhando ao lado" badge on `MonitoringScreen` is a small future improvement. Note: since `headYawDegrees` / `headPitchDegrees` are now persisted in telemetry (columns 26–27), look-away can be reconstructed post-hoc from the raw angles even without a UI flag.
 - **PT-BR only (scope decision, not a limitation)**: user-facing strings are inlined in Compose (`"Iniciar monitoramento"`, `"Fadigado"`, etc.). `strings.xml` is intentionally near-empty. Full i18n / localization is out of scope by design — the app targets Brazilian drivers only.
 - **MonitoringService / camera code lacks unit tests**: covered by smoke testing.
 

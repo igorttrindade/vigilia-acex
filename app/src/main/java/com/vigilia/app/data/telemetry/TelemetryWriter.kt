@@ -80,7 +80,9 @@ class TelemetryWriter private constructor(
         val file = File(folder, "session.csv")
         // Columns 0-17: core telemetry. Columns 18-21: FatigueScorer sub-scores (diagnostic).
         // Columns 22-24: lighting context (ambient lux, mean frame Y, lighting mode).
-        file.writeText("sessionId,timestamp,score,state,eyeOpenness,blinkRate,isYawning,isFaceDetected,alertActive,latitude,longitude,speed,accelX,accelY,accelZ,gyroX,gyroY,gyroZ,perclos,perclosContribution,blinkContribution,yawnContribution,ambientLightLux,frameLuminance,lightingMode\n")
+        // Columns 25-26: head orientation in degrees (yaw, pitch) — persisted for post-hoc
+        // disambiguation of "head down vs. drowsy" cases.
+        file.writeText("sessionId,timestamp,score,state,eyeOpenness,blinkRate,isYawning,isFaceDetected,alertActive,latitude,longitude,speed,accelX,accelY,accelZ,gyroX,gyroY,gyroZ,perclos,perclosContribution,blinkContribution,yawnContribution,ambientLightLux,frameLuminance,lightingMode,headYawDegrees,headPitchDegrees\n")
 
         currentSessionId = sessionId
         sessionFolder = folder
@@ -132,7 +134,9 @@ class TelemetryWriter private constructor(
                     append(record.yawnContribution).append(",")
                     append(record.ambientLightLux?.toString() ?: "").append(",")
                     append(record.frameLuminance).append(",")
-                    append(record.lightingMode).append("\n")
+                    append(record.lightingMode).append(",")
+                    append(record.headYawDegrees?.toString() ?: "").append(",")
+                    append(record.headPitchDegrees?.toString() ?: "").append("\n")
                 }
 
                 FileWriter(file, true).use { writer ->

@@ -34,4 +34,8 @@ data class TelemetryRecordDto(
     @SerialName("ambient_light_lux") val ambientLightLux: Float? = null,
     @SerialName("frame_luminance") val frameLuminance: Float? = null,
     @SerialName("lighting_mode") val lightingMode: String? = null,
+    // Head orientation (degrees). Requires columns added to telemetry_records via
+    // ALTER TABLE in the Supabase dashboard.
+    @SerialName("head_yaw_degrees") val headYawDegrees: Float? = null,
+    @SerialName("head_pitch_degrees") val headPitchDegrees: Float? = null,
 )

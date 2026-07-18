@@ -140,6 +140,9 @@ class SyncRepository(private val context: Context) {
                 ambientLightLux = if (p.size > 22) p[22].toFloatOrNull() else null,
                 frameLuminance = if (p.size > 23) p[23].toFloatOrNull() else null,
                 lightingMode = if (p.size > 24 && p[24].isNotBlank()) p[24] else null,
+                // Head orientation (added after lighting columns). Absent on older sessions → null.
+                headYawDegrees = if (p.size > 25) p[25].toFloatOrNull() else null,
+                headPitchDegrees = if (p.size > 26) p[26].toFloatOrNull() else null,
             )
         } catch (e: Exception) {
             Log.w("SyncRepository", "Failed to parse CSV line: $line", e)

@@ -78,4 +78,9 @@ data class TelemetryRecord(
     val ambientLightLux: Float? = null,
     val frameLuminance: Float = 0f,
     val lightingMode: String = "NORMAL",
+    // Head orientation in degrees (positive yaw = head right, positive pitch = head up).
+    // Persisted for post-hoc disambiguation between "head down" (blendshapes inflated by
+    // camera angle) and genuine fatigue. Null on rows written before this column existed.
+    val headYawDegrees: Float? = null,
+    val headPitchDegrees: Float? = null,
 )
