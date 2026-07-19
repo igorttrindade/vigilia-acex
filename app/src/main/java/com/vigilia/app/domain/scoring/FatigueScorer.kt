@@ -34,10 +34,15 @@ class FatigueScorer(
         const val YAWN_DURATION_MS = 1_500L
         // Was 5_000L → 3_000L → 4_000L. 5s pinned the score high for too long. 3s made
         // recovery feel abrupt ("score derretendo instantaneamente" when yawn releases).
-        // 4s is the middle ground: still shorter than the original penalty, but the yawn
-        // contribution fades gradually enough that the number visible to the driver drops
-        // smoothly instead of dropping in a step.
-        const val YAWN_RESET_MS = 4_000L
+        //
+        // New model (field-tested): treat a confirmed yawn as a fatigue impulse whose
+        // score contribution HOLDS at full for a short window, then LINEARLY DECAYS toward
+        // zero over a longer window. This lets the score honestly express "a yawn happened,
+        // fatigue is elevated" while decaying naturally instead of falling off a cliff via
+        // an arbitrary timer. Users reported the old 4s cliff-drop felt wrong — "the person
+        // yawned, why did the score drop back to baseline in 4 seconds?".
+        const val YAWN_HOLD_MS = 3_000L    // full-strength contribution for the first 3s post-confirmation
+        const val YAWN_DECAY_MS = 30_000L  // then linearly decay to 0 over the next 30s
         // Brief mouth-close tolerance: door not reset mid-yawn due to speaking/coughing frame
         const val YAWN_GRACE_MS = 300L
         // Was 0.3f — score converged in ~4-5 frames (~150 ms) after any raw drop, giving
@@ -157,8 +162,26 @@ class FatigueScorer(
         // that the eyes aren't reliably visible yet.
         const val CALIBRATION_STABILIZATION_TOLERANCE_FRAMES = 3
 
-        // Blink debounce: require this many consecutive frames below threshold before confirming closure
-        const val BLINK_MIN_CLOSED_FRAMES = 3
+        // Blink debounce: require this many consecutive frames below threshold before confirming closure.
+        // Was 3 (≈100 ms at 30 fps) — field-reported that light/fast blinks (60-90 ms) were
+        // being missed, users had to blink harder for detection to fire. Dropped to 2 (≈66 ms),
+        // which still rejects single-frame MediaPipe flickers but captures natural fast blinks.
+        // Matches PERCLOS_MIN_CLOSED_FRAMES so any confirmed blink also counts toward PERCLOS.
+        const val BLINK_MIN_CLOSED_FRAMES = 2
+
+        // Blink detection uses a SEPARATE (more lenient) threshold than PERCLOS. Rationale:
+        // PERCLOS follows the automotive standard "closed = < 30 % of open baseline" which is
+        // conservative (captures only genuine, sustained closure) — right for the fatigue
+        // metric. Blinks, by contrast, are transient and often only bring the openness down
+        // to ~50-60 % of baseline before rebounding, especially light/fast blinks. Under a
+        // single 30 %-of-baseline threshold, MediaPipe was reading these light blinks as
+        // "partial closure" (blendshape 0.28-0.35 vs. calibrated threshold ~0.255) and the
+        // blink detector never fired. The literature (e.g. Wierwille et al.) uses ~50 % of
+        // baseline for blink onset — matching that here.
+        const val BLINK_CLOSED_THRESHOLD_DEFAULT = 0.50f
+        const val BLINK_CLOSED_RATIO = 0.50f   // closed-for-blink = baseline * this
+        const val BLINK_CLOSED_MIN = 0.30f     // floor for narrow-eyed calibrations
+        const val BLINK_CLOSED_MAX = 0.60f     // ceiling so blink threshold never exceeds a sane range
         // Blink max: sustained closure beyond this is PERCLOS territory, not a blink
         const val BLINK_MAX_DURATION_MS = 500L
         // Warmup: don't penalize low blink rate until enough data has been collected
@@ -171,6 +194,31 @@ class FatigueScorer(
         const val LOOK_AWAY_YAW_DEGREES = 25f
         const val LOOK_AWAY_PITCH_DEGREES_UP = 20f     // head tilted upward
         const val LOOK_AWAY_PITCH_DEGREES_DOWN = 25f   // head tilted downward (slightly more permissive — driver glances at dashboard)
+
+        // Time-limit on the look-away freeze. Legit dashboard/mirror glances take 1-2s; past
+        // that, the head position is no longer a "glance" — it's either sustained distraction
+        // or actual fatigue (chin dropping toward chest). Under permanent freeze, fatigue with
+        // head-down is silently masked (reported field bug: 20s of eyes-closed + head-down +
+        // yawn → zero alerts). After this window we reset the fatigue buffers and resume
+        // normal accumulation. Distraction with eyes open is protected by EAR — PERCLOS won't
+        // inflate because openness stays above threshold.
+        const val LOOK_AWAY_MAX_FREEZE_MS = 2_000L
+
+        // Minimum buffer size before PERCLOS is trusted. After a time-limit exit we clear
+        // perclosWindow so pre-look-away data doesn't contaminate; without this guard, the
+        // first few frames would compute PERCLOS = closed/tiny_total = spurious 100%.
+        // 60 frames ≈ 2s @ 30fps — smallest window that gives meaningful ratio.
+        const val MIN_PERCLOS_FRAMES = 60
+
+        // Microsleep detector — orthogonal to PERCLOS. Sustained continuous eye closure
+        // promotes state directly, bypassing the PERCLOS-based FSM. Rationale: with weight
+        // 65 and window 30 s, PERCLOS alone needs ~0.77 (23 s of the last 30 s closed) to
+        // cross the WARNING gate (50). Field test showed 20 s of solid closure only reached
+        // PERCLOS ≈ 0.68 → contribution 44 → below gate. Automotive DMS literature treats
+        // 3-5 s of continuous closure as a critical microsleep event, so we detect it
+        // categorically instead of diluting in the PERCLOS denominator.
+        const val MICROSLEEP_WARNING_MS = 3_000L
+        const val MICROSLEEP_FATIGUED_MS = 6_000L
     }
 
     private data class FrameRecord(val timestampMs: Long, val isEyeClosed: Boolean)
@@ -224,6 +272,12 @@ class FatigueScorer(
     private var eyeClosedThreshold = EYE_CLOSED_THRESHOLD_DEFAULT
     private var eyeOpenThreshold = EYE_OPEN_THRESHOLD_DEFAULT
 
+    // Independent, more lenient threshold used ONLY by the blink detector. Recalculated
+    // by finishCalibration() as baseline * BLINK_CLOSED_RATIO; falls back to the default
+    // when calibration is disabled.
+    private var blinkClosedThreshold = BLINK_CLOSED_THRESHOLD_DEFAULT
+    private var blinkOpenThreshold = BLINK_CLOSED_THRESHOLD_DEFAULT + 0.10f
+
     // Timestamp when the current look-away began (-1 = not looking away). Used on release
     // to shift buffer timestamps forward by the look-away duration so PERCLOS/blink windows
     // keep representing the last 30s / 60s of *forward-facing driving time*, not wall clock.
@@ -232,6 +286,11 @@ class FatigueScorer(
     // updated) for every frame during look-away so smoothedScore / state / perclos stay
     // truly frozen — no drift from stale rawScore computed over a decimated buffer.
     private var lookAwayFrozenAssessment: FatigueAssessment? = null
+
+    // Timestamp of the first debounced-closed frame in the current continuous-closure
+    // streak. -1L when eyes are open or the streak was just broken. Feeds the microsleep
+    // detector below.
+    private var continuousClosureStartMs: Long = -1L
 
     fun processFrame(metrics: FatigueMetrics): FatigueAssessment {
         if (!metrics.isFaceDetected) {
@@ -254,6 +313,7 @@ class FatigueScorer(
                 calibrationEligibleSinceMs = -1L
                 firstCalibrationFrameMs = -1L
                 calibrationBelowCount = 0
+                continuousClosureStartMs = -1L
                 createAssessment(0f, now, false, 0f, false)
             } else {
                 // Brief glitch — hold current state so detection progress isn't lost
@@ -365,21 +425,52 @@ class FatigueScorer(
                 blinkRate = blinkTimestamps.size.toFloat(),
                 isYawning = isCurrentlyYawning,
             )
+            // Clear microsleep timer: while looking away, head-pose is off-axis and eye
+            // blendshapes are noisy — don't extend a "continuous closure" streak with
+            // frames we're not measuring reliably.
+            continuousClosureStartMs = -1L
         }
 
-        // While LOOKING AWAY: return the frozen snapshot (with timestamp bumped so consumers
-        // see it as a live sample). Reset the debounce / yawn timers so that when the driver
-        // returns, the next real frame starts a clean streak instead of resuming mid-count.
+        // While LOOKING AWAY: two sub-paths depending on duration.
+        //   1) < LOOK_AWAY_MAX_FREEZE_MS: quick glance (mirror/dashboard) — return the
+        //      frozen snapshot; the buffer stays intact so nothing spuriously accumulates.
+        //   2) >= LOOK_AWAY_MAX_FREEZE_MS: sustained rotation/tilt — no longer treated as
+        //      a glance. Reset fatigue buffers and FALL THROUGH to normal processing so
+        //      real fatigue signals (head-down + eyes-closed + yawn) can accumulate.
+        //      Distraction with eyes open is safe: EAR keeps openness > threshold → PERCLOS
+        //      stays 0.
         if (isLookingAway) {
-            perclosConsecutiveClosedCount = 0
-            perclosLastClassifiedClosed = false
-            yawnStartTime = null
-            yawnGraceStart = null
-            closedFrameCount = 0
-            isBlinking = false
-            blinkStartTime = null
-            return lookAwayFrozenAssessment?.copy(timestampMs = currentTime)
-                ?: createAssessment(smoothedScore, currentTime, true, 0f, isCurrentlyYawning)
+            val lookAwayElapsed = currentTime - lookAwayStartTime
+            if (lookAwayElapsed >= LOOK_AWAY_MAX_FREEZE_MS) {
+                Log.d(
+                    "FatigueScorer",
+                    "Look-away freeze time-limit exceeded (${lookAwayElapsed}ms) — resetting fatigue buffers and resuming",
+                )
+                perclosWindow.clear()
+                blinkTimestamps.clear()
+                monitoringStartMs = currentTime
+                perclosConsecutiveClosedCount = 0
+                perclosLastClassifiedClosed = false
+                closedFrameCount = 0
+                isBlinking = false
+                blinkStartTime = null
+                continuousClosureStartMs = -1L
+                // Yawn timers intentionally NOT reset — if the driver was mid-yawn when the
+                // time-limit hit, the timer keeps counting and the yawn confirms shortly after.
+                lookAwayStartTime = -1L
+                lookAwayFrozenAssessment = null
+                // Fall through to normal PERCLOS / blink / yawn / score computation below
+            } else {
+                perclosConsecutiveClosedCount = 0
+                perclosLastClassifiedClosed = false
+                yawnStartTime = null
+                yawnGraceStart = null
+                closedFrameCount = 0
+                isBlinking = false
+                blinkStartTime = null
+                return lookAwayFrozenAssessment?.copy(timestampMs = currentTime)
+                    ?: createAssessment(smoothedScore, currentTime, true, 0f, isCurrentlyYawning)
+            }
         }
 
         // Look-away EXIT: shift buffer timestamps forward by the look-away duration so aged
@@ -427,14 +518,28 @@ class FatigueScorer(
             false
         }
 
+        // Microsleep tracking — anchor a timestamp on the first debounced-closed frame of
+        // the current streak. A single open frame breaks the streak. See the override block
+        // after updateState() for how this drives categorical WARNING/FATIGUED promotion.
+        if (debouncedEyeClosed) {
+            if (continuousClosureStartMs < 0L) continuousClosureStartMs = currentTime
+        } else {
+            continuousClosureStartMs = -1L
+        }
+
         // 1. PERCLOS Calculation — buffer add + drain by age. We only reach here when NOT
         // looking away (early return above), so no isLookingAway guard is needed.
         perclosWindow.addLast(FrameRecord(currentTime, debouncedEyeClosed))
         while (perclosWindow.isNotEmpty() && currentTime - perclosWindow.first().timestampMs > PERCLOS_WINDOW_MS) {
             perclosWindow.removeFirst()
         }
-        val perclos = if (perclosWindow.isEmpty()) 0f else {
-            perclosWindow.count { it.isEyeClosed }.toFloat() / perclosWindow.size
+        val perclos = when {
+            perclosWindow.isEmpty() -> 0f
+            // Guard: after a look-away time-limit reset, the buffer starts empty and any
+            // early closed frames would compute perclos = closed/tiny_total = spurious
+            // high value. Wait until we have MIN_PERCLOS_FRAMES of real data.
+            perclosWindow.size < MIN_PERCLOS_FRAMES -> 0f
+            else -> perclosWindow.count { it.isEyeClosed }.toFloat() / perclosWindow.size
         }
 
         if (monitoringStartMs < 0) monitoringStartMs = currentTime
@@ -442,10 +547,12 @@ class FatigueScorer(
         // 2. Blink Detection — uses min(left,right) to match PERCLOS OR logic and handle
         // asymmetric readings (e.g. one eye inflated by glasses reflection).
         // Temporal debounce: requires BLINK_MIN_CLOSED_FRAMES consecutive frames below threshold.
+        // Uses blinkClosedThreshold / blinkOpenThreshold — more lenient than eyeClosedThreshold
+        // so light/fast blinks (which only partially close the eye per MediaPipe) still register.
         // Max duration: closure > BLINK_MAX_DURATION_MS is sustained (PERCLOS), not a blink.
         val eyeMin = minOf(metrics.leftEyeOpenProbability, metrics.rightEyeOpenProbability)
         if (!isBlinking) {
-            if (eyeMin < eyeClosedThreshold) {
+            if (eyeMin < blinkClosedThreshold) {
                 closedFrameCount++
                 if (closedFrameCount >= BLINK_MIN_CLOSED_FRAMES) {
                     isBlinking = true
@@ -460,7 +567,7 @@ class FatigueScorer(
             isBlinking = false
             blinkStartTime = null
             closedFrameCount = 0
-        } else if (eyeMin > eyeOpenThreshold) {
+        } else if (eyeMin > blinkOpenThreshold) {
             blinkTimestamps.addLast(currentTime)
             isBlinking = false
             blinkStartTime = null
@@ -472,30 +579,30 @@ class FatigueScorer(
         val blinkRate = blinkTimestamps.size.toFloat()
 
         // 3. Yawn Detection
+        // isCurrentlyYawning tracks the *physical* yawn (mouth open past duration threshold,
+        // until it closes past the grace period). lastYawnDetectedTime marks the instant
+        // the yawn was first confirmed — that's the anchor for the hold+decay contribution
+        // curve below. Multiple yawns each refresh the anchor.
         if (metrics.mouthOpenProbability > YAWN_THRESHOLD_PROB) {
             yawnGraceStart = null
             if (yawnStartTime == null) {
                 yawnStartTime = currentTime
-            } else if (currentTime - yawnStartTime!! >= YAWN_DURATION_MS) {
-                if (lastYawnDetectedTime == null || currentTime - lastYawnDetectedTime!! > YAWN_RESET_MS) {
-                    isCurrentlyYawning = true
-                    lastYawnDetectedTime = currentTime
-                }
+            } else if (currentTime - yawnStartTime!! >= YAWN_DURATION_MS && !isCurrentlyYawning) {
+                // First confirmation of this yawn instance — anchor the decay curve here
+                isCurrentlyYawning = true
+                lastYawnDetectedTime = currentTime
             }
         } else {
-            // Grace period: tolerate brief mouth closures (cough, speech) without resetting the timer
+            // Grace period: tolerate brief mouth closures (cough, speech) without ending the yawn
             if (yawnStartTime != null) {
                 if (yawnGraceStart == null) {
                     yawnGraceStart = currentTime
                 } else if (currentTime - yawnGraceStart!! > YAWN_GRACE_MS) {
                     yawnStartTime = null
                     yawnGraceStart = null
+                    isCurrentlyYawning = false
                 }
             }
-        }
-
-        if (isCurrentlyYawning && lastYawnDetectedTime != null && currentTime - lastYawnDetectedTime!! > YAWN_RESET_MS) {
-            isCurrentlyYawning = false
         }
 
         // 4. Score Calculation
@@ -508,7 +615,22 @@ class FatigueScorer(
             elapsedMonitoringMs < BLINK_MIN_OBSERVATION_MS -> 0f
             else -> calculateBlinkDeviationScore(blinkRate) * SCORE_WEIGHT_BLINK
         }
-        val yawnContribution = if (isCurrentlyYawning) SCORE_WEIGHT_YAWN else 0f
+        // Yawn contributes full weight during YAWN_HOLD_MS, then decays linearly to zero
+        // across YAWN_DECAY_MS. Anchored at the instant the yawn was first confirmed.
+        // Independent of whether the mouth is still open — physiologically, the fatigue
+        // signal from a yawn persists beyond the mouth closing.
+        val yawnContribution = lastYawnDetectedTime?.let { confirmedAt ->
+            val elapsed = currentTime - confirmedAt
+            when {
+                elapsed < 0L -> 0f
+                elapsed <= YAWN_HOLD_MS -> SCORE_WEIGHT_YAWN
+                elapsed <= YAWN_HOLD_MS + YAWN_DECAY_MS -> {
+                    val decayProgress = (elapsed - YAWN_HOLD_MS).toFloat() / YAWN_DECAY_MS.toFloat()
+                    SCORE_WEIGHT_YAWN * (1f - decayProgress)
+                }
+                else -> 0f
+            }
+        } ?: 0f
 
         val rawScore = perclosContribution + blinkContribution + yawnContribution
         smoothedScore = (SMOOTHING_ALPHA * rawScore) + (1f - SMOOTHING_ALPHA) * smoothedScore
@@ -517,6 +639,28 @@ class FatigueScorer(
 
         // 5. State Machine with Hysteresis
         updateState(smoothedScore, currentTime)
+
+        // 6. Microsleep override — sustained continuous closure promotes state directly,
+        // bypassing the PERCLOS-based FSM. See constants MICROSLEEP_WARNING_MS /
+        // MICROSLEEP_FATIGUED_MS for the fixed thresholds. Promotion is one-way — cannot
+        // demote. While microsleep is above threshold, the FSM's demotion accumulator is
+        // also cleared so state doesn't oscillate back to NORMAL when PERCLOS is still
+        // below its MIN_PERCLOS_FRAMES guard (score reads as 0).
+        if (continuousClosureStartMs >= 0L) {
+            val closureMs = currentTime - continuousClosureStartMs
+            val microsleepState = when {
+                closureMs >= MICROSLEEP_FATIGUED_MS -> FatigueState.FATIGUED
+                closureMs >= MICROSLEEP_WARNING_MS -> FatigueState.WARNING
+                else -> null
+            }
+            if (microsleepState != null) {
+                if (stateSeverity(microsleepState) > stateSeverity(currentState)) {
+                    currentState = microsleepState
+                }
+                targetState = null
+                transitionAccumulatedMs = 0L
+            }
+        }
 
         return createAssessment(
             score = smoothedScore,
@@ -554,11 +698,14 @@ class FatigueScorer(
         calibrationSamples.clear()
         eyeClosedThreshold = EYE_CLOSED_THRESHOLD_DEFAULT
         eyeOpenThreshold = EYE_OPEN_THRESHOLD_DEFAULT
+        blinkClosedThreshold = BLINK_CLOSED_THRESHOLD_DEFAULT
+        blinkOpenThreshold = BLINK_CLOSED_THRESHOLD_DEFAULT + 0.10f
         closedFrameCount = 0
         blinkStartTime = null
         monitoringStartMs = -1L
         lookAwayStartTime = -1L
         lookAwayFrozenAssessment = null
+        continuousClosureStartMs = -1L
     }
 
     private fun finishCalibration() {
@@ -578,6 +725,11 @@ class FatigueScorer(
             eyeClosedThreshold + 0.05f,
             (eyeClosedThreshold + 0.20f).coerceAtMost(0.90f),
         )
+        // Blink threshold — more lenient than PERCLOS so light/fast blinks (that only
+        // partially close the eye per MediaPipe) still register. See BLINK_CLOSED_RATIO
+        // docstring for rationale.
+        blinkClosedThreshold = (baseline * BLINK_CLOSED_RATIO).coerceIn(BLINK_CLOSED_MIN, BLINK_CLOSED_MAX)
+        blinkOpenThreshold = (blinkClosedThreshold + 0.10f).coerceAtMost(0.90f)
 
         // Seed the PERCLOS window with the just-collected calibration frames re-evaluated
         // against the new threshold. Uses the min-based openness (same metric the runtime
@@ -599,7 +751,7 @@ class FatigueScorer(
         // penalizing 30 s after calibration ends, which is unnecessarily conservative.
         monitoringStartMs = calibrationSamples.first().ts
 
-        Log.d("FatigueScorer", "Calibration done: baseline=$baseline closed=$eyeClosedThreshold open=$eyeOpenThreshold samples=${calibrationSamples.size} seededPerclos=${perclosWindow.size}")
+        Log.d("FatigueScorer", "Calibration done: baseline=$baseline closed=$eyeClosedThreshold open=$eyeOpenThreshold blinkClosed=$blinkClosedThreshold blinkOpen=$blinkOpenThreshold samples=${calibrationSamples.size} seededPerclos=${perclosWindow.size}")
     }
 
     private fun calculateBlinkDeviationScore(blinkRate: Float): Float {
@@ -685,6 +837,16 @@ class FatigueScorer(
             ambientLightLux = ambientLuxProvider(),
             lightingMode = lightingModeProvider().name,
         )
+    }
+
+    // Ordinal mapping used by the microsleep override to compare active-scoring states.
+    // NO_FACE and CALIBRATING return -1 so they never participate — but the override block
+    // is unreachable while state is either of those (early returns above).
+    private fun stateSeverity(s: FatigueState): Int = when (s) {
+        FatigueState.NORMAL -> 0
+        FatigueState.WARNING -> 1
+        FatigueState.FATIGUED -> 2
+        else -> -1
     }
 
     private fun currentNoFaceGraceMs(): Long = when (lightingModeProvider()) {

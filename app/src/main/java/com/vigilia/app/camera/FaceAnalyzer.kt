@@ -227,10 +227,12 @@ class FaceAnalyzer(
 
                     // EAR (Eye Aspect Ratio) uses geometric eyelid distances — immune to lens
                     // reflections that inflate blendshape-based openness for glasses wearers.
-                    // We take the minimum of blendshape and EAR so reflections never hide a blink.
+                    // combineEyeOpenness() defaults to min(blend, ear) but falls back to
+                    // blendshape alone when EAR appears to be a landmark artifact (very low
+                    // reading while blendshape says clearly-open). See helper docs.
                     val (earLeft, earRight) = calculateEarOpenness(landmarksList[safeIndex])
-                    val finalLeft  = minOf(blendLeft, earLeft)
-                    val finalRight = minOf(blendRight, earRight)
+                    val finalLeft  = combineEyeOpenness(blendLeft, earLeft)
+                    val finalRight = combineEyeOpenness(blendRight, earRight)
 
                     // Head orientation from MediaPipe's transformation matrix for the selected face.
                     val (headYaw, headPitch) = extractYawPitchDegrees(matrixesOpt, safeIndex)
@@ -240,7 +242,14 @@ class FaceAnalyzer(
                     lastDriverCenterX = (bbox[0] + bbox[2]) / 2f
                     lastDriverCenterY = (bbox[1] + bbox[3]) / 2f
 
-                    Log.d("FaceAnalyzer", "faces=${landmarksList.size} selected=$safeIndex blinkL=$eyeBlinkLeft blinkR=$eyeBlinkRight jawOpen=$jawOpen earL=$earLeft earR=$earRight yaw=$headYaw pitch=$headPitch")
+                    Log.d(
+                        "FaceAnalyzer",
+                        "faces=${landmarksList.size} sel=$safeIndex " +
+                            "blend[L=$blendLeft R=$blendRight avg=$blendAvg] " +
+                            "ear[L=$earLeft R=$earRight] " +
+                            "final[L=$finalLeft R=$finalRight] " +
+                            "jaw=$jawOpen yaw=$headYaw pitch=$headPitch",
+                    )
                     FatigueMetrics(
                         leftEyeOpenProbability  = finalLeft,
                         rightEyeOpenProbability = finalRight,
@@ -407,6 +416,23 @@ class FaceAnalyzer(
         // Used to map raw EAR → [0,1] openness probability.
         private const val EAR_OPEN_REFERENCE = 0.28f
 
+        // EAR jitter guard. Real blinks push EAR toward 0 (eyelids touching), but so do
+        // landmark errors — upper/lower eye landmarks can collapse or the horizontal
+        // measurement can fall outside the eye entirely, producing spurious near-zero EAR
+        // even when the eye is clearly open. When blendshape confidently reports "open"
+        // (>= BLEND_CONFIDENT_OPEN) but EAR is below EAR_MIN_TRUSTED, we treat the EAR
+        // reading as a landmark artifact and fall back to blendshape alone. Real blinks
+        // still work because blendshape ALSO drops during a real blink, so this branch
+        // does not fire and the min() path (glasses reflection protection) still applies.
+        //
+        // Threshold set at 0.05: real EAR during blink peak is typically 0.03-0.15 for
+        // a fraction of the closure. Landmark errors produce EAR ≤ 0.03 sustained. A
+        // higher threshold (originally 0.15) blocked the descending edge of real blinks
+        // and caused detection lag — field-reported blink misses. 0.05 separates the two
+        // populations without swallowing blink mid-frames.
+        const val EAR_MIN_TRUSTED = 0.05f
+        const val BLEND_CONFIDENT_OPEN = 0.30f
+
         // 8×8 grid ≈ 64 samples — enough for a stable mean, cheap enough to run per frame.
         private const val LUMINANCE_SAMPLES_PER_AXIS = 8
 
@@ -440,6 +466,25 @@ class FaceAnalyzer(
 
         /** True when the current lighting mode warrants CLAHE preprocessing. Pure — testable. */
         fun shouldApplyClahe(mode: LightingMode): Boolean = mode != LightingMode.NORMAL
+
+        /**
+         * Combines the two eye-openness sensors into a single value.
+         *
+         * Default behavior: return `min(blend, ear)` — the stricter reading wins, so a
+         * closure detected by either sensor counts. This protects against glasses
+         * reflections that inflate blendshape.
+         *
+         * Guard: when blendshape confidently reports open (≥ [BLEND_CONFIDENT_OPEN]) but
+         * EAR is near zero (< [EAR_MIN_TRUSTED]), the EAR reading is almost certainly a
+         * landmark artifact. In that case we ignore EAR and use blendshape alone —
+         * otherwise PERCLOS inflates from isolated frames where landmarks jitter.
+         *
+         * Pure — testable in unit tests.
+         */
+        fun combineEyeOpenness(blend: Float, ear: Float): Float {
+            val earUntrustworthy = ear < EAR_MIN_TRUSTED && blend > BLEND_CONFIDENT_OPEN
+            return if (earUntrustworthy) blend else minOf(blend, ear)
+        }
 
         /** Gamma factor to apply to the Y channel for the given mode. Pure — testable. */
         fun gammaFor(mode: LightingMode): Float = when (mode) {
