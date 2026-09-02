@@ -1,7 +1,9 @@
 package com.vigilia.app.data.repository
 
+import android.util.Log
 import com.vigilia.app.data.remote.SupabaseClient
 import com.vigilia.app.data.remote.dto.ProfileDto
+import com.vigilia.app.terms.TermsConfig
 import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.providers.builtin.Email
 import io.github.jan.supabase.auth.status.SessionStatus
@@ -13,6 +15,9 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import java.time.Instant
 
 /** Handles Supabase email/password authentication. */
 class AuthRepository {
@@ -39,18 +44,64 @@ class AuthRepository {
         }
     }
 
-    /** Creates a new account with email, password and full name. Upserts the profile row immediately after auth. */
-    suspend fun signUp(email: String, password: String, fullName: String): Result<Unit> = runCatching {
+    /**
+     * Creates a new account with email, password and full name, gravando o
+     * aceite dos termos na mesma chamada.
+     *
+     * O `full_name` e as versões/timestamps dos aceites são passados como
+     * `raw_user_meta_data` do usuário Supabase. O trigger `handle_new_user`
+     * do lado do banco lê esses campos e cria a linha correspondente em
+     * `profiles` (idempotente via `ON CONFLICT DO NOTHING`).
+     *
+     * Como fallback (caso o trigger tenha sido desabilitado no dashboard), o
+     * método também tenta um `upsert` direto em `profiles` — mas isolado num
+     * `try/catch`, porque com "Confirm email" habilitado a sessão ainda não
+     * está ativa nesse ponto e a RLS bloqueia o upsert. O trigger é a
+     * garantia principal; o upsert é opcional e não pode fazer o signUp
+     * inteiro falhar.
+     */
+    suspend fun signUp(
+        email: String,
+        password: String,
+        fullName: String,
+        tosAcceptedAt: Instant,
+        privacyAcceptedAt: Instant,
+    ): Result<Unit> = runCatching {
         val user = SupabaseClient.client.auth.signUpWith(Email) {
             this.email = email
             this.password = password
+            this.data = buildJsonObject {
+                put("full_name", fullName)
+                put("tos_version", TermsConfig.TOS_CURRENT_VERSION)
+                put("tos_accepted_at", tosAcceptedAt.toString())
+                put("privacy_version", TermsConfig.PRIVACY_CURRENT_VERSION)
+                put("privacy_accepted_at", privacyAcceptedAt.toString())
+            }
         }
         val userId = user?.id
             ?: SupabaseClient.client.auth.currentUserOrNull()?.id
-            ?: error("Usuário não encontrado após o cadastro")
-        SupabaseClient.client.from("profiles").upsert(
-            ProfileDto(id = userId, fullname = fullName)
-        )
+
+        // Fallback opcional. Se falhar (RLS bloqueando por falta de sessão, ou
+        // trigger já preencheu), tudo bem — o trigger é a garantia.
+        if (userId != null) {
+            try {
+                SupabaseClient.client.from("profiles").upsert(
+                    ProfileDto(
+                        id = userId,
+                        fullname = fullName,
+                        tosVersion = TermsConfig.TOS_CURRENT_VERSION,
+                        tosAcceptedAt = tosAcceptedAt.toString(),
+                        privacyVersion = TermsConfig.PRIVACY_CURRENT_VERSION,
+                        privacyAcceptedAt = privacyAcceptedAt.toString(),
+                    )
+                )
+            } catch (e: Exception) {
+                Log.i(
+                    "AuthRepository",
+                    "Profile upsert fallback falhou (esperado com email confirmation): ${e.message}",
+                )
+            }
+        }
     }
 
     /** Sends a password reset email with a deep link back to the app. */

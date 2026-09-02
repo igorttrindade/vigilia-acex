@@ -3,6 +3,7 @@ package com.vigilia.app.ui.auth
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.vigilia.app.data.repository.AuthRepository
+import com.vigilia.app.data.repository.ProfileRepository
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -10,6 +11,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.time.Instant
+
+/** Dados do cadastro pendente aguardando aceite dos termos. */
+data class PendingSignup(
+    val email: String,
+    val password: String,
+    val fullName: String,
+)
 
 data class AuthUiState(
     val isLoading: Boolean = false,
@@ -32,12 +41,21 @@ data class AuthUiState(
     val isResetSessionReady: Boolean = false,
     // Sign-up requires email confirmation before accessing the app
     val registrationPendingConfirmation: Boolean = false,
+    // Fluxo de aceite de termos:
+    // Set quando o usuário apertou "Criar conta" com campos válidos e ainda
+    // não aceitou os termos. O nav observa essa flag pra ir para terms_signup.
+    val awaitingTermsForSignup: Boolean = false,
+    // Set quando um signIn foi bem-sucedido mas o profile do usuário precisa
+    // atualizar/aceitar termos (versão vigente diferente da gravada). O nav
+    // observa essa flag pra ir para terms_login em vez de setup.
+    val requiresTermsAcceptance: Boolean = false,
 )
 
 /** Manages email/password authentication state for [AuthScreen]. */
 class AuthViewModel : ViewModel() {
 
     private val authRepository = AuthRepository()
+    private val profileRepository = ProfileRepository()
 
     private val _uiState = MutableStateFlow(
         AuthUiState(
@@ -48,6 +66,7 @@ class AuthViewModel : ViewModel() {
     val uiState: StateFlow<AuthUiState> = _uiState.asStateFlow()
 
     private var resetSessionTimeoutJob: Job? = null
+    private var pendingSignup: PendingSignup? = null
 
     init {
         // Mirror Supabase's session status into the UI state so the password-reset flow can
@@ -127,27 +146,110 @@ class AuthViewModel : ViewModel() {
         _uiState.update { it.copy(isLoading = true, errorMessage = null) }
         viewModelScope.launch {
             authRepository.signIn(state.email, state.password)
-                .onSuccess { _uiState.update { it.copy(isLoading = false, isLoggedIn = true) } }
+                .onSuccess {
+                    // Auto-heal + gate de termos. Se o profile não existe (órfão), cria.
+                    // Depois checa se aceite está em dia; se não, exige termos antes de logar.
+                    val ensured = profileRepository.ensureProfile()
+                    ensured.onFailure { e ->
+                        android.util.Log.w("AuthViewModel", "ensureProfile falhou: ${e.message}", e)
+                    }
+                    val profile = profileRepository.getCurrentProfile()
+                    val needsTerms = profileRepository.needsTermsAcceptance(profile)
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            isLoggedIn = !needsTerms,
+                            requiresTermsAcceptance = needsTerms,
+                        )
+                    }
+                }
                 .onFailure { e ->
                     _uiState.update { it.copy(isLoading = false, errorMessage = mapError(e.message)) }
                 }
         }
     }
 
-    fun signUp() {
+    /**
+     * Chamado pelo botão "Criar conta" na AuthScreen. Valida os campos e — se
+     * OK — guarda o payload em [pendingSignup] e ativa a flag
+     * [AuthUiState.awaitingTermsForSignup]. O nav observa essa flag e vai
+     * para `terms_signup`; a criação real da conta só acontece depois em
+     * [completeSignupAfterTerms].
+     */
+    fun beginSignup() {
         if (!validateFields(isSignUp = true)) return
         val state = _uiState.value
-        _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+        pendingSignup = PendingSignup(
+            email = state.email.trim(),
+            password = state.password,
+            fullName = state.fullName.trim(),
+        )
+        _uiState.update { it.copy(errorMessage = null, awaitingTermsForSignup = true) }
+    }
+
+    /**
+     * Chamado pela TermsAcceptanceScreen(SIGNUP) ao aceitar os dois termos.
+     * Dispara o signUp real com os timestamps, mesmo passando por metadata
+     * para o trigger `handle_new_user` do Supabase preencher `profiles`.
+     */
+    fun completeSignupAfterTerms(tosAcceptedAt: Instant, privacyAcceptedAt: Instant) {
+        val payload = pendingSignup ?: run {
+            _uiState.update { it.copy(errorMessage = "Sessão de cadastro expirada. Tente novamente.", awaitingTermsForSignup = false) }
+            return
+        }
+        _uiState.update { it.copy(isLoading = true, errorMessage = null, awaitingTermsForSignup = false) }
         viewModelScope.launch {
-            authRepository.signUp(state.email, state.password, state.fullName)
+            authRepository.signUp(
+                email = payload.email,
+                password = payload.password,
+                fullName = payload.fullName,
+                tosAcceptedAt = tosAcceptedAt,
+                privacyAcceptedAt = privacyAcceptedAt,
+            )
                 .onSuccess {
+                    pendingSignup = null
                     if (authRepository.isLoggedIn()) {
+                        // Sessão ativa imediatamente (email confirm desabilitado). Termos já
+                        // foram gravados pelo trigger + metadata — vai direto pro app.
                         _uiState.update { it.copy(isLoading = false, isLoggedIn = true) }
                     } else {
+                        // Email confirmation habilitado: sessão só abre após confirmar. Mostra
+                        // tela "confira seu email".
                         _uiState.update { it.copy(isLoading = false, registrationPendingConfirmation = true) }
                     }
                 }
                 .onFailure { e ->
+                    _uiState.update { it.copy(isLoading = false, errorMessage = mapError(e.message)) }
+                }
+        }
+    }
+
+    /** Cancela o cadastro pendente (usuário voltou da TermsAcceptanceScreen). */
+    fun cancelPendingSignup() {
+        pendingSignup = null
+        _uiState.update { it.copy(awaitingTermsForSignup = false) }
+    }
+
+    /**
+     * Chamado pela TermsAcceptanceScreen(LOGIN) ao aceitar os dois termos
+     * durante o fluxo de login de um usuário existente. Grava as versões +
+     * timestamps no profile e libera acesso ao app.
+     */
+    fun completeTermsAcceptanceForLogin(tosAcceptedAt: Instant, privacyAcceptedAt: Instant) {
+        _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+        viewModelScope.launch {
+            profileRepository.recordTermsAcceptance(tosAcceptedAt, privacyAcceptedAt)
+                .onSuccess {
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            isLoggedIn = true,
+                            requiresTermsAcceptance = false,
+                        )
+                    }
+                }
+                .onFailure { e ->
+                    android.util.Log.w("AuthViewModel", "recordTermsAcceptance falhou", e)
                     _uiState.update { it.copy(isLoading = false, errorMessage = mapError(e.message)) }
                 }
         }
@@ -220,7 +322,14 @@ class AuthViewModel : ViewModel() {
                 .onFailure { e ->
                     android.util.Log.w("AuthViewModel", "Sign out failed on server", e)
                 }
-            _uiState.update { it.copy(isLoggedIn = false) }
+            pendingSignup = null
+            _uiState.update {
+                it.copy(
+                    isLoggedIn = false,
+                    requiresTermsAcceptance = false,
+                    awaitingTermsForSignup = false,
+                )
+            }
         }
     }
 

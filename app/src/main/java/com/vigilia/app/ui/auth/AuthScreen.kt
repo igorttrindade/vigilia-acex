@@ -161,7 +161,7 @@ fun AuthScreen(
 
         // Primary action button
         Button(
-            onClick = { if (isSignUpMode) viewModel.signUp() else viewModel.signIn() },
+            onClick = { if (isSignUpMode) viewModel.beginSignup() else viewModel.signIn() },
             enabled = !uiState.isLoading,
             modifier = Modifier
                 .fillMaxWidth()

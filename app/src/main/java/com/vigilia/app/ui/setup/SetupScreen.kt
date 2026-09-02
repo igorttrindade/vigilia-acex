@@ -20,11 +20,11 @@ import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -37,13 +37,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import com.vigilia.app.ui.theme.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 
 @Composable
 fun SetupScreen(
     viewModel: SetupViewModel,
     onMonitoringStarted: () -> Unit,
-    onLogout: () -> Unit = {},
+    onRequestPermissionsGate: () -> Unit = {},
+    pendingPermissionRequest: StateFlow<Boolean> = MutableStateFlow(false),
+    onPendingPermissionConsumed: () -> Unit = {},
 ) {
     val uiState by viewModel.uiState.collectAsState()
 
@@ -53,38 +58,60 @@ fun SetupScreen(
         viewModel.onPermissionsResult(permissions)
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        SetupContent(
-            uiState = uiState,
-            onCalibrationToggled = viewModel::onCalibrationToggled,
-            onLowLightAdaptationToggled = viewModel::onLowLightAdaptationToggled,
-            onRequestPermissions = {
-                permissionLauncher.launch(
-                    arrayOf(
-                        android.Manifest.permission.CAMERA,
-                        android.Manifest.permission.ACCESS_FINE_LOCATION,
-                    ),
-                )
-            },
-        ) {
-            viewModel.startMonitoring()
-            onMonitoringStarted()
-        }
-
-        IconButton(
-            onClick = onLogout,
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(top = 8.dp, end = 8.dp),
-        ) {
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.Logout,
-                contentDescription = "Sair",
-                tint = com.vigilia.app.ui.theme.TextSecondary,
+    // Dispara o prompt do SO depois que a TermsAcceptanceScreen(PERMISSION) confirma
+    // o aceite e volta pra cá com savedStateHandle["pending_permission_request"] = true.
+    val pending by pendingPermissionRequest.collectAsState()
+    LaunchedEffect(pending) {
+        if (pending) {
+            onPendingPermissionConsumed()
+            permissionLauncher.launch(
+                arrayOf(
+                    android.Manifest.permission.CAMERA,
+                    android.Manifest.permission.ACCESS_FINE_LOCATION,
+                ),
             )
         }
     }
+
+    SetupContent(
+        uiState = uiState,
+        onCalibrationToggled = viewModel::onCalibrationToggled,
+        onLowLightAdaptationToggled = viewModel::onLowLightAdaptationToggled,
+        onRequestPermissions = onRequestPermissionsGate,
+    ) {
+        viewModel.startMonitoring()
+        onMonitoringStarted()
+    }
 }
+
+private data class PermissionExplanation(
+    val icon: ImageVector,
+    val title: String,
+    val body: String,
+)
+
+private val CameraExplanation = PermissionExplanation(
+    icon = Icons.Default.CameraAlt,
+    title = "Como usamos a câmera",
+    body = "A câmera frontal é usada para analisar sinais de fadiga em tempo real: " +
+        "abertura dos olhos (PERCLOS), taxa de piscadas, bocejos e posição da cabeça.\n\n" +
+        "O processamento acontece 100% no seu celular. Nenhuma imagem, vídeo ou frame " +
+        "é gravado, salvo em disco ou enviado para nossos servidores.\n\n" +
+        "Apenas as métricas numéricas (score de fadiga, contagem de piscadas, etc.) " +
+        "são armazenadas localmente e sincronizadas ao final da sessão.",
+)
+
+private val LocationExplanation = PermissionExplanation(
+    icon = Icons.Default.LocationOn,
+    title = "Como usamos a localização",
+    body = "Registramos coordenadas GPS e velocidade a cada 2 segundos junto com as " +
+        "métricas de fadiga, para dar contexto à sessão — por exemplo, saber em qual " +
+        "trecho da viagem um alerta aconteceu.\n\n" +
+        "Nada é enviado em tempo real. Os dados só sobem para o servidor quando a " +
+        "sessão termina e a sincronização é executada.\n\n" +
+        "Essa permissão é opcional. Se negar, o monitoramento de fadiga continua " +
+        "funcionando normalmente — só não haverá contexto de localização nos relatórios.",
+)
 
 @Composable
 fun SetupContent(
@@ -94,6 +121,8 @@ fun SetupContent(
     onRequestPermissions: () -> Unit,
     onStartMonitoring: () -> Unit,
 ) {
+    var explanationTarget by remember { mutableStateOf<PermissionExplanation?>(null) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -183,6 +212,7 @@ fun SetupContent(
                     icon = Icons.Default.CameraAlt,
                     title = "Câmera",
                     isGranted = uiState.isCameraPermissionGranted,
+                    onInfoClick = { explanationTarget = CameraExplanation },
                 )
                 HorizontalDivider(
                     color = BackgroundDark,
@@ -195,6 +225,7 @@ fun SetupContent(
                     subtitle = "Para telemetria GPS e velocidade",
                     isGranted = uiState.isLocationPermissionGranted,
                     required = false,
+                    onInfoClick = { explanationTarget = LocationExplanation },
                 )
             }
         }
@@ -298,6 +329,13 @@ fun SetupContent(
 
         Spacer(modifier = Modifier.height(24.dp))
     }
+
+    explanationTarget?.let { target ->
+        PermissionExplanationDialog(
+            explanation = target,
+            onDismiss = { explanationTarget = null },
+        )
+    }
 }
 
 @Composable
@@ -307,6 +345,7 @@ fun PermissionRow(
     isGranted: Boolean,
     subtitle: String? = null,
     required: Boolean = true,
+    onInfoClick: (() -> Unit)? = null,
 ) {
     Row(
         modifier = Modifier
@@ -349,12 +388,89 @@ fun PermissionRow(
                 fontSize = 12.sp,
             )
         }
+        if (onInfoClick != null) {
+            IconButton(
+                onClick = onInfoClick,
+                modifier = Modifier.size(32.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Info,
+                    contentDescription = "Como usamos $title",
+                    tint = TextSecondary.copy(alpha = 0.6f),
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            Spacer(modifier = Modifier.width(4.dp))
+        }
         Icon(
             imageVector = if (isGranted) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
             contentDescription = null,
             tint = if (isGranted) NormalGreen else TextSecondary.copy(alpha = 0.4f),
             modifier = Modifier.size(20.dp),
         )
+    }
+}
+
+@Composable
+private fun PermissionExplanationDialog(
+    explanation: PermissionExplanation,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            color = SurfaceDark,
+            shape = RoundedCornerShape(20.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(modifier = Modifier.padding(24.dp)) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .background(
+                            AccentAmber.copy(alpha = 0.15f),
+                            RoundedCornerShape(12.dp),
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = explanation.icon,
+                        contentDescription = null,
+                        tint = AccentAmber,
+                        modifier = Modifier.size(24.dp),
+                    )
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = explanation.title,
+                    color = TextPrimary,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = explanation.body,
+                    color = TextSecondary,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                )
+                Spacer(modifier = Modifier.height(20.dp))
+                Button(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = AccentAmber),
+                    shape = RoundedCornerShape(12.dp),
+                ) {
+                    Text(
+                        text = "Entendi",
+                        color = BackgroundDark,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp,
+                    )
+                }
+            }
+        }
     }
 }
 

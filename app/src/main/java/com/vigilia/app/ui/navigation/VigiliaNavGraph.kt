@@ -9,9 +9,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.MonitorHeart
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -34,28 +34,47 @@ import com.vigilia.app.ui.auth.AuthScreen
 import com.vigilia.app.ui.auth.AuthViewModel
 import com.vigilia.app.ui.auth.ForgotPasswordScreen
 import com.vigilia.app.ui.auth.ResetPasswordScreen
+import com.vigilia.app.terms.TermsConfig
 import com.vigilia.app.ui.history.HistoryScreen
 import com.vigilia.app.ui.history.HistoryViewModel
 import com.vigilia.app.ui.monitoring.MonitoringScreen
 import com.vigilia.app.ui.monitoring.MonitoringViewModel
+import com.vigilia.app.ui.options.OptionsScreen
+import com.vigilia.app.ui.options.ProfileScreen
+import com.vigilia.app.ui.options.ProfileViewModel
+import com.vigilia.app.ui.options.TermsViewerScreen
 import com.vigilia.app.ui.setup.SetupScreen
 import com.vigilia.app.ui.setup.SetupViewModel
+import com.vigilia.app.ui.terms.TermsAcceptanceScreen
+import com.vigilia.app.ui.terms.TermsMode
 import com.vigilia.app.ui.theme.AccentAmber
 
 sealed class Screen(val route: String, val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
-    object Setup : Screen("setup", "Configurar", Icons.Default.Settings)
+    object Setup : Screen("setup", "Configurar", Icons.Default.Tune)
     object Monitoring : Screen("monitoring", "Monitorar", Icons.Default.MonitorHeart)
-    object History : Screen("history", "Histórico", Icons.Default.History)
+    object Options : Screen("options", "Opções", Icons.Default.Settings)
 }
+
+private const val ROUTE_HISTORY = "history"
+private const val ROUTE_PROFILE = "options/profile"
+private const val ROUTE_TERMS_VIEW = "options/terms"
+private const val ROUTE_PRIVACY_VIEW = "options/privacy"
 
 private const val ROUTE_AUTH = "auth"
 private const val ROUTE_FORGOT_PASSWORD = "forgot_password"
 private const val ROUTE_RESET_PASSWORD = "reset_password"
+private const val ROUTE_TERMS_SIGNUP = "terms_signup"
+private const val ROUTE_TERMS_LOGIN = "terms_login"
+private const val ROUTE_TERMS_PERMISSION = "terms_permission"
+
+/** SavedStateHandle key set by [ROUTE_TERMS_PERMISSION] to trigger the OS permission prompt. */
+const val KEY_PENDING_PERMISSION_REQUEST = "pending_permission_request"
 
 @Composable
 @Suppress("unused")
 fun VigiliaNavGraph(
     navController: NavHostController,
+    startDestination: String = ROUTE_AUTH,
     isPasswordResetDeepLink: Boolean = false,
     onPasswordResetHandled: () -> Unit = {},
 ) {
@@ -68,10 +87,6 @@ fun VigiliaNavGraph(
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
 
-    val startDestination = remember {
-        if (AuthRepository().isLoggedIn()) Screen.Setup.route else ROUTE_AUTH
-    }
-
     // Navigate to reset password screen when app is opened via deep link
     LaunchedEffect(isPasswordResetDeepLink) {
         if (isPasswordResetDeepLink) {
@@ -80,10 +95,43 @@ fun VigiliaNavGraph(
         }
     }
 
-    // Navigate back to auth when the user logs out
-    LaunchedEffect(authUiState.isLoggedIn) {
-        if (!authUiState.isLoggedIn && currentRoute != null && currentRoute != ROUTE_AUTH) {
+    // Navigate back to auth when the user logs out. Also cover the terms routes so
+    // signing out from mid-flow lands on the auth screen too.
+    LaunchedEffect(authUiState.isLoggedIn, authUiState.requiresTermsAcceptance) {
+        val onAuthFlow = currentRoute == null ||
+            currentRoute == ROUTE_AUTH ||
+            currentRoute == ROUTE_FORGOT_PASSWORD ||
+            currentRoute == ROUTE_RESET_PASSWORD
+        if (!authUiState.isLoggedIn && !authUiState.requiresTermsAcceptance && !onAuthFlow) {
             navController.navigate(ROUTE_AUTH) {
+                popUpTo(0) { inclusive = true }
+            }
+        }
+    }
+
+    // Sign-up flow: quando o AuthViewModel sinaliza que os termos precisam de aceite
+    // antes de criar a conta, navega para a tela de termos (modo SIGNUP).
+    LaunchedEffect(authUiState.awaitingTermsForSignup) {
+        if (authUiState.awaitingTermsForSignup && currentRoute == ROUTE_AUTH) {
+            navController.navigate(ROUTE_TERMS_SIGNUP) { launchSingleTop = true }
+        }
+    }
+
+    // Post-signIn: se o profile do usuário existente exige aceite dos termos vigentes,
+    // navega para a tela de termos (modo LOGIN) em vez de deixar entrar no app.
+    LaunchedEffect(authUiState.requiresTermsAcceptance) {
+        if (authUiState.requiresTermsAcceptance && currentRoute != ROUTE_TERMS_LOGIN) {
+            navController.navigate(ROUTE_TERMS_LOGIN) {
+                popUpTo(ROUTE_AUTH) { inclusive = false }
+                launchSingleTop = true
+            }
+        }
+    }
+
+    // Após login concluído (com termos em dia), sai da tela de auth para o setup.
+    LaunchedEffect(authUiState.isLoggedIn) {
+        if (authUiState.isLoggedIn && (currentRoute == ROUTE_AUTH || currentRoute == ROUTE_TERMS_LOGIN)) {
+            navController.navigate(Screen.Setup.route) {
                 popUpTo(0) { inclusive = true }
             }
         }
@@ -91,7 +139,14 @@ fun VigiliaNavGraph(
 
     Scaffold(
         bottomBar = {
-            val authRoutes = setOf(ROUTE_AUTH, ROUTE_FORGOT_PASSWORD, ROUTE_RESET_PASSWORD)
+            val authRoutes = setOf(
+                ROUTE_AUTH,
+                ROUTE_FORGOT_PASSWORD,
+                ROUTE_RESET_PASSWORD,
+                ROUTE_TERMS_SIGNUP,
+                ROUTE_TERMS_LOGIN,
+                ROUTE_TERMS_PERMISSION,
+            )
             if (currentRoute !in authRoutes) {
                 VigiliaBottomBar(navController = navController)
             }
@@ -102,7 +157,14 @@ fun VigiliaNavGraph(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            val authRoutes = setOf(ROUTE_AUTH, ROUTE_FORGOT_PASSWORD, ROUTE_RESET_PASSWORD)
+            val authRoutes = setOf(
+                ROUTE_AUTH,
+                ROUTE_FORGOT_PASSWORD,
+                ROUTE_RESET_PASSWORD,
+                ROUTE_TERMS_SIGNUP,
+                ROUTE_TERMS_LOGIN,
+                ROUTE_TERMS_PERMISSION,
+            )
             if (isMonitoringActive && currentRoute !in authRoutes) {
                 ActiveMonitoringBanner()
             }
@@ -141,7 +203,52 @@ fun VigiliaNavGraph(
                         },
                     )
                 }
-                composable(Screen.Setup.route) {
+                composable(ROUTE_TERMS_SIGNUP) {
+                    TermsAcceptanceScreen(
+                        mode = TermsMode.SIGNUP,
+                        onAccepted = { tosAt, privacyAt ->
+                            authViewModel.completeSignupAfterTerms(tosAt, privacyAt)
+                            // signUp real acontece assíncrono; volta pra auth para que a
+                            // AuthScreen mostre "conta criada!" (registrationPendingConfirmation)
+                            // ou o LaunchedEffect de isLoggedIn navegue pro setup.
+                            navController.navigate(ROUTE_AUTH) {
+                                popUpTo(ROUTE_AUTH) { inclusive = true }
+                            }
+                        },
+                        onCancel = {
+                            authViewModel.cancelPendingSignup()
+                            navController.navigate(ROUTE_AUTH) {
+                                popUpTo(ROUTE_AUTH) { inclusive = true }
+                            }
+                        },
+                    )
+                }
+                composable(ROUTE_TERMS_LOGIN) {
+                    TermsAcceptanceScreen(
+                        mode = TermsMode.LOGIN,
+                        onAccepted = { tosAt, privacyAt ->
+                            authViewModel.completeTermsAcceptanceForLogin(tosAt, privacyAt)
+                        },
+                        onCancel = {
+                            authViewModel.signOut()
+                        },
+                    )
+                }
+                composable(ROUTE_TERMS_PERMISSION) {
+                    TermsAcceptanceScreen(
+                        mode = TermsMode.PERMISSION,
+                        onAccepted = { tosAt, privacyAt ->
+                            authViewModel.completeTermsAcceptanceForLogin(tosAt, privacyAt)
+                            // Sinaliza ao SetupScreen para disparar o prompt do SO
+                            navController.previousBackStackEntry
+                                ?.savedStateHandle
+                                ?.set(KEY_PENDING_PERMISSION_REQUEST, true)
+                            navController.popBackStack()
+                        },
+                        onCancel = { navController.popBackStack() },
+                    )
+                }
+                composable(Screen.Setup.route) { backStackEntry ->
                     val setupViewModel: SetupViewModel = viewModel()
                     SetupScreen(
                         viewModel = setupViewModel,
@@ -152,14 +259,53 @@ fun VigiliaNavGraph(
                                 restoreState = true
                             }
                         },
-                        onLogout = { authViewModel.signOut() },
+                        onRequestPermissionsGate = {
+                            navController.navigate(ROUTE_TERMS_PERMISSION) { launchSingleTop = true }
+                        },
+                        pendingPermissionRequest = backStackEntry.savedStateHandle
+                            .getStateFlow(KEY_PENDING_PERMISSION_REQUEST, false),
+                        onPendingPermissionConsumed = {
+                            backStackEntry.savedStateHandle[KEY_PENDING_PERMISSION_REQUEST] = false
+                        },
                     )
                 }
                 composable(Screen.Monitoring.route) {
                     val monitoringViewModel: MonitoringViewModel = viewModel()
                     MonitoringScreen(viewModel = monitoringViewModel)
                 }
-                composable(Screen.History.route) {
+                composable(Screen.Options.route) {
+                    OptionsScreen(
+                        onNavigateProfile = { navController.navigate(ROUTE_PROFILE) },
+                        onNavigateTerms = { navController.navigate(ROUTE_TERMS_VIEW) },
+                        onNavigatePrivacy = { navController.navigate(ROUTE_PRIVACY_VIEW) },
+                        onNavigateHistory = { navController.navigate(ROUTE_HISTORY) },
+                        onLogout = { authViewModel.signOut() },
+                    )
+                }
+                composable(ROUTE_PROFILE) {
+                    val profileViewModel: ProfileViewModel = viewModel()
+                    ProfileScreen(
+                        viewModel = profileViewModel,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+                composable(ROUTE_TERMS_VIEW) {
+                    TermsViewerScreen(
+                        title = "Termo de Uso",
+                        versionLabel = "Versão ${TermsConfig.TOS_CURRENT_VERSION}",
+                        assetPath = TermsConfig.TOS_ASSET,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+                composable(ROUTE_PRIVACY_VIEW) {
+                    TermsViewerScreen(
+                        title = "Política de Privacidade",
+                        versionLabel = "Versão ${TermsConfig.PRIVACY_CURRENT_VERSION}",
+                        assetPath = TermsConfig.PRIVACY_ASSET,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+                composable(ROUTE_HISTORY) {
                     val historyViewModel: HistoryViewModel = viewModel()
                     HistoryScreen(viewModel = historyViewModel)
                 }
@@ -170,7 +316,7 @@ fun VigiliaNavGraph(
 
 @Composable
 fun VigiliaBottomBar(navController: NavHostController) {
-    val items = listOf(Screen.Setup, Screen.Monitoring, Screen.History)
+    val items = listOf(Screen.Setup, Screen.Monitoring, Screen.Options)
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
 
