@@ -19,15 +19,15 @@ Sessões são persistidas localmente (CSV + JSON) e sincronizadas com Supabase (
 ## Funcionalidades
 
 - **Detecção facial on-device** — nenhum frame de câmera sai do dispositivo. Todo o processamento roda localmente com MediaPipe FaceLandmarker (modelo bundled como asset).
-- **Score composto de fadiga** — combina PERCLOS (percentual de olhos fechados numa janela de 30 s), taxa de piscadas (janela de 60 s) e detecção de bocejos, com pesos 65/15/25 e suavização exponencial.
+- **Score composto de fadiga** — combina PERCLOS (percentual de olhos fechados numa janela de 30 s), taxa de piscadas (janela de 60 s) e detecção de bocejos, com pesos 65/10/15 (PERCLOS/piscadas/bocejos, soma = 90) e suavização exponencial.
 - **Máquina de estados com histerese** — transições NORMAL ↔ WARNING ↔ FATIGUED exigem que o score sustente o limiar por 3–5 segundos, evitando falsos positivos em oscilações momentâneas.
 - **Calibração personalizada** — nos primeiros 10 s de cada sessão, o app mede a abertura natural dos olhos do motorista e ajusta o limiar de "olho fechado" (padrão PERCLOS-70).
 - **Detecção de olhar para o lado** — pausa o acúmulo de PERCLOS quando o motorista checa espelhos/painel (yaw > 25° ou pitch fora da faixa), evitando falsos alertas.
 - **Adaptação a baixa luz (Fase 1)** — máquina de estados NORMAL/LOW_LIGHT/DARK que ativa pré-processamento OpenCV (CLAHE + gamma), ajusta EV/FPS/scene-mode da câmera via Camera2Interop e amplia a tolerância de perda de face em DARK.
-- **Alertas sonoros** — toca ringtone (canal USAGE_ALARM) por 3 s no início e re-alerta a cada 8 s enquanto o estado FATIGUED persistir.
+- **Alertas sonoros** — bipe curto via `ToneGenerator` (STREAM_ALARM) na transição para WARNING/FATIGUED, com re-alerta a cada 8 s enquanto FATIGUED persistir.
 - **Serviço em foreground** — monitoramento continua mesmo com a tela desligada, com WakeLock de segurança limitado a 2 h.
 - **Sincronização com Supabase** — WorkManager envia sessões e telemetria para tabelas Postgres protegidas por RLS. Falhas usam backoff exponencial (30 s, até 3 tentativas).
-- **Histórico local + exportação** — todas as sessões ficam armazenadas em `filesDir/sessions/{uuid}/` e podem ser exportadas via `Intent.ACTION_SEND_MULTIPLE`.
+- **Histórico local com detalhamento** — todas as sessões ficam armazenadas em `filesDir/sessions/{uuid}/`. Tocando num item do histórico, o app abre uma tela de detalhe com gráfico de score ao longo da sessão (peak-preserving, downsample para até 600 pontos) e marcadores de alarme. Para tirar os CSVs do device: `adb pull /data/data/com.vigilia.app/files/sessions/`.
 - **Autenticação** — cadastro/login por e-mail e senha, com fluxo completo de "esqueci minha senha" via deep link.
 
 ## Como funciona
@@ -91,7 +91,8 @@ A chave usada é a `sb_publishable_*` (pública por design) — a segurança rea
 # Instalar em device conectado
 ./gradlew installDebug
 
-# Release APK (minificação desabilitada por enquanto)
+# Release APK (R8 + resource shrinking habilitados; assinado com keystore local
+# — RELEASE_KEYSTORE_* em local.properties; ver docs/decisions.md)
 ./gradlew :app:assembleRelease
 
 # Suíte de testes JVM
@@ -123,7 +124,7 @@ Uma linha por usuário. Referenciada por `sessions.user_id` e `telemetry_records
 
 João abre o app, concede as permissões de câmera e localização no `SetupScreen`, mantém a calibração ligada e toca em **Iniciar**. O `MonitoringService` sobe como foreground service (ícone persistente na barra) e:
 
-- Cria pasta local `filesDir/sessions/{uuid}/` com `session.csv` (só o cabeçalho de 25 colunas por enquanto).
+- Cria pasta local `filesDir/sessions/{uuid}/` com `session.csv` (só o cabeçalho de 27 colunas por enquanto).
 - Instancia um `FatigueScorer` novo e reseta o `LightingMonitor`.
 - Começa a receber frames da câmera frontal.
 
@@ -133,7 +134,7 @@ Nada ainda no Supabase — a sincronização acontece só ao final da sessão.
 
 A cada **2 segundos**, o app grava uma linha em `session.csv`. Ao final da sessão, essas linhas viram registros em `telemetry_records` no Supabase (batches de 100 via `upsert`).
 
-**Esquema completo da tabela `telemetry_records`** (25 colunas):
+**Esquema completo da tabela `telemetry_records`** (27 colunas):
 
 | Coluna Supabase | Tipo | Origem | Descrição |
 |---|---|---|---|
@@ -154,11 +155,13 @@ A cada **2 segundos**, o app grava uma linha em `session.csv`. Ao final da sess�
 | `gyro_x/y/z` | real | SensorManager (gyro) | rad/s, nullable |
 | `perclos` | real | `FatigueScorer` | % de frames com olho fechado (0-1) na janela de 30 s |
 | `perclos_contribution` | real | `FatigueScorer` | Parcela do PERCLOS no score final (peso 65) |
-| `blink_contribution` | real | `FatigueScorer` | Parcela do desvio de piscadas no score (peso 15) |
-| `yawn_contribution` | real | `FatigueScorer` | Parcela do bocejo no score (peso 25) |
+| `blink_contribution` | real | `FatigueScorer` | Parcela do desvio de piscadas no score (peso 10) |
+| `yawn_contribution` | real | `FatigueScorer` | Parcela do bocejo no score (peso 15) |
 | `ambient_light_lux` | real | Sensor `TYPE_LIGHT` | Lux ambiente, nullable |
 | `frame_luminance` | real | `FaceAnalyzer` | Média Y do frame 0-255 |
 | `lighting_mode` | text | `LightingMonitor` | `NORMAL`, `LOW_LIGHT`, `DARK` |
+| `head_yaw_degrees` | real | `FaceAnalyzer` | Yaw da cabeça em graus (decomposto da matriz de transformação facial). Permite reconstruir look-away post-hoc |
+| `head_pitch_degrees` | real | `FaceAnalyzer` | Pitch da cabeça em graus |
 
 **Exemplo de linhas ao longo da viagem de João:**
 
@@ -275,7 +278,7 @@ Declaradas no manifest e concedidas automaticamente pelo sistema:
 
 Testes unitários em JVM (sem device):
 
-- **`FatigueScorerTest`** — 21 testes cobrindo o algoritmo: cálculo de PERCLOS, detecção de piscadas, gatilho de bocejo, transições da máquina de estados com histerese, calibração (gate + tolerância + hard cap), integridade entre sessões consecutivas, olhar-para-o-lado não inflando PERCLOS, PERCLOS sozinho não promovendo a FATIGUED, seeding pós-calibração.
+- **`FatigueScorerTest`** — 50 testes cobrindo o algoritmo: cálculo de PERCLOS, detecção de piscadas, gatilho de bocejo, transições da máquina de estados com histerese, calibração (gate + tolerância + hard cap), integridade entre sessões consecutivas, olhar-para-o-lado não inflando PERCLOS, PERCLOS sozinho não promovendo a FATIGUED, seeding pós-calibração, e os três safety nets de microsono (pre-calibração com limiar 0.20, disparo através de NO_FACE, e preservação de buffers na recuperação de detecção).
 - **`LightingMonitorTest`** — 11 testes cobrindo a FSM de iluminação: início em NORMAL, histerese, dwell assimétrico (2 s escurecer / 3 s clarear), túneis breves não flipam o modo, funcionamento sem sensor de lux.
 - **`FaceAnalyzerLightingModeTest`** — 6 testes das funções puras `shouldApplyClahe(mode)` e `gammaFor(mode)`.
 - **`LuminanceCalcTest`** — 6 testes do cálculo de luminância Y (buffers uniformes, mascaramento de byte sem sinal, `rowStride` com padding).
@@ -304,15 +307,14 @@ app/src/main/java/com/vigilia/app/
     ├── auth/                    # AuthScreen, ForgotPasswordScreen, ResetPasswordScreen + ViewModel
     ├── setup/                   # SetupScreen + SetupViewModel
     ├── monitoring/              # MonitoringScreen + MonitoringViewModel
-    ├── history/                 # HistoryScreen + HistoryViewModel
+    ├── history/                 # HistoryScreen + HistoryViewModel + SessionDetailScreen + SessionDetailViewModel
     └── theme/                   # Cores e tipografia Material 3
 ```
 
 ## Limitações conhecidas
 
-- **Minificação de release desabilitada** (`isMinifyEnabled = false`). Chave Supabase publishable acaba no DEX — não é vazamento de segredo (é pública por design), mas ProGuard rules completas para Supabase-kt/Ktor/Compose estão pendentes.
 - **UI de gravação de vídeo** existe visualmente no `MonitoringScreen`, mas não está conectada a nenhum recorder.
-- **Um rosto por vez** — `FaceLandmarker` configurado com `setNumFaces(1)`. Passageiros no assento traseiro não são um problema, mas o app não foi projetado para múltiplos ocupantes na cabine.
+- **Seleção de motorista em cabine cheia** — `FaceLandmarker` detecta até 4 rostos e `FaceAnalyzer.pickDriverIndex` escolhe o motorista pela área do bbox sobre 5 landmarks centrais estáveis, com bias sticky pro rosto anterior enquanto sua área for ≥70% do maior. Passageiros que se inclinam pra frente não roubam mais a atenção do algoritmo. Edge case não tratado: passageiro com rosto exatamente do mesmo tamanho e posição do motorista (raro — criança no colo, etc.).
 - **`isLookingAway` não é exibido na UI** — computado no scorer, poderia virar um badge "Olhando ao lado" no `MonitoringScreen`.
 - **Internacionalização** — strings da UI hard-coded em PT-BR. O `strings.xml` está praticamente vazio.
 - **Cobertura de testes assimétrica** — o núcleo algorítmico (scoring, lighting) tem cobertura sólida; o pipeline de câmera e integrações com o sistema Android são cobertos apenas por smoke test.
