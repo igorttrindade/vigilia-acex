@@ -13,8 +13,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.lifecycle.Lifecycle
@@ -45,6 +46,8 @@ import java.util.*
 @Composable
 fun HistoryScreen(
     viewModel: HistoryViewModel,
+    onSessionClick: (String) -> Unit,
+    onBack: () -> Unit,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(lifecycleOwner) {
@@ -57,23 +60,39 @@ fun HistoryScreen(
 
     HistoryContent(
         uiState = uiState,
-        onExportSession = viewModel::exportSession,
+        onSessionClick = onSessionClick,
+        onBack = onBack,
     )
 }
 
 @Composable
 fun HistoryContent(
     uiState: HistoryUiState,
-    onExportSession: (String) -> Unit,
+    onSessionClick: (String) -> Unit,
+    onBack: () -> Unit,
 ) {
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(BackgroundDark),
     ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 4.dp, end = 12.dp, top = 8.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Voltar",
+                    tint = TextPrimary,
+                )
+            }
+        }
         // Header
         Column(
-            modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 16.dp),
+            modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 16.dp),
         ) {
             Text(
                 text = "Histórico",
@@ -161,7 +180,10 @@ fun HistoryContent(
                     contentPadding = PaddingValues(bottom = 16.dp),
                 ) {
                     items(uiState.sessions) { session ->
-                        SessionCard(session = session, onExport = { onExportSession(session.sessionId) })
+                        SessionCard(
+                            session = session,
+                            onClick = { onSessionClick(session.sessionId) },
+                        )
                     }
                 }
             }
@@ -218,7 +240,7 @@ private fun StatItem(label: String, value: String, valueColor: Color = TextPrima
 @Composable
 fun SessionCard(
     session: SessionSummary,
-    onExport: () -> Unit,
+    onClick: () -> Unit,
 ) {
     val stateColor = when (session.dominantState) {
         FatigueState.NORMAL -> NormalGreen
@@ -230,6 +252,7 @@ fun SessionCard(
     Surface(
         color = SurfaceDark,
         shape = RoundedCornerShape(16.dp),
+        onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
     ) {
         Row(modifier = Modifier.height(IntrinsicSize.Min)) {
@@ -267,17 +290,12 @@ fun SessionCard(
                             fontSize = 13.sp,
                         )
                     }
-                    IconButton(
-                        onClick = onExport,
-                        modifier = Modifier.size(32.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Share,
-                            contentDescription = "Exportar",
-                            tint = AccentAmber,
-                            modifier = Modifier.size(18.dp),
-                        )
-                    }
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = TextSecondary.copy(alpha = 0.6f),
+                        modifier = Modifier.size(20.dp),
+                    )
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -379,7 +397,8 @@ fun HistoryScreenPreview() {
                 ),
                 isLoading = false,
             ),
-            onExportSession = {},
+            onSessionClick = {},
+            onBack = {},
         )
     }
 }

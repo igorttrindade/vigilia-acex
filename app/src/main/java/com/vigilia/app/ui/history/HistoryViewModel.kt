@@ -1,11 +1,6 @@
 package com.vigilia.app.ui.history
 
 import android.app.Application
-import android.content.ClipData
-import android.content.Intent
-import android.net.Uri
-import android.util.Log
-import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.vigilia.app.data.repository.SessionRepository
@@ -27,7 +22,8 @@ data class HistoryUiState(
 
 /**
  * ViewModel for the History screen.
- * Responsible for loading session summaries and exporting session data.
+ * Responsible for loading session summaries. Tapping a session navigates to the detail
+ * screen — this VM no longer exports files.
  */
 @Suppress("unused")
 class HistoryViewModel(application: Application) : AndroidViewModel(application) {
@@ -57,45 +53,6 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
                     isEmpty = sessions.isEmpty(),
                 )
             }
-        }
-    }
-
-    /**
-     * Triggers the Android ShareSheet to export the session CSV file.
-     *
-     * @param sessionId The ID of the session to export.
-     */
-    fun exportSession(sessionId: String) {
-        try {
-            val folder = repository.getSessionFolder(sessionId)
-            if (!folder.exists()) return
-
-            val files = folder.listFiles()?.filter { it.extension == "csv" || it.extension == "json" }
-            if (files.isNullOrEmpty()) return
-
-            val uris = ArrayList<Uri>(files.map { file ->
-                FileProvider.getUriForFile(getApplication(), "com.vigilia.app.fileprovider", file)
-            })
-
-            val clipData = ClipData.newRawUri(null, uris[0]).also { clip ->
-                uris.drop(1).forEach { clip.addItem(ClipData.Item(it)) }
-            }
-
-            val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-                type = "*/*"
-                putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
-                this.clipData = clipData
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-
-            val shareIntent = Intent.createChooser(intent, "Exportar Sessão").apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-
-            getApplication<Application>().startActivity(shareIntent)
-        } catch (e: Exception) {
-            Log.e("HistoryViewModel", "Export failed", e)
         }
     }
 }

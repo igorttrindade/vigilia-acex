@@ -10,6 +10,19 @@ import org.json.JSONObject
 import java.io.File
 
 /**
+ * One row of the session CSV projected to just what the detail chart needs.
+ * `alertActive` samples the CSV column directly — it's true only during the ~550 ms the
+ * ringtone was playing, so treat it as "at least one alarm around this bucket", not as a
+ * ground-truth of every alarm.
+ */
+data class SessionTelemetryPoint(
+    val timestamp: Long,
+    val score: Float,
+    val state: FatigueState,
+    val alertActive: Boolean,
+)
+
+/**
  * Repository responsible for reading and managing saved sessions from local storage.
  *
  * It scans the application's session directory and retrieves session summaries
@@ -103,6 +116,78 @@ class SessionRepository private constructor(
      */
     fun getSessionFolder(sessionId: String): File {
         return File(baseDir, sessionId)
+    }
+
+    /**
+     * Reads the CSV of a session and returns a lightweight timeline suitable for the
+     * detail chart. Skips malformed lines. Absent files → empty list.
+     *
+     * Downsamples to at most [maxPoints] using bucketed averaging (preserves alerts and
+     * peak scores within each bucket) so long sessions don't hurt Canvas rendering.
+     */
+    suspend fun getSessionTelemetry(
+        sessionId: String,
+        maxPoints: Int = 600,
+    ): List<SessionTelemetryPoint> = withContext(Dispatchers.IO) {
+        val csv = File(baseDir, "$sessionId/session.csv")
+        if (!csv.exists()) return@withContext emptyList<SessionTelemetryPoint>()
+
+        val raw = try {
+            csv.useLines { lines ->
+                lines.drop(1)
+                    .filter { it.isNotBlank() }
+                    .mapNotNull { parseTelemetryLine(it) }
+                    .toList()
+            }
+        } catch (e: Exception) {
+            Log.w("SessionRepository", "Failed to read telemetry for $sessionId", e)
+            return@withContext emptyList<SessionTelemetryPoint>()
+        }
+
+        if (raw.size <= maxPoints) raw else downsample(raw, maxPoints)
+    }
+
+    private fun parseTelemetryLine(line: String): SessionTelemetryPoint? {
+        return try {
+            val p = line.split(",")
+            if (p.size < 9) return null
+            val state = try {
+                FatigueState.valueOf(p[3])
+            } catch (_: Exception) {
+                FatigueState.NORMAL
+            }
+            SessionTelemetryPoint(
+                timestamp = p[1].toLong(),
+                score = p[2].toFloat(),
+                state = state,
+                alertActive = p[8].toBoolean(),
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Bucketed downsampling that preserves the peak score and any alert within each bucket,
+     * so the resulting curve still shows spikes and every alarm dot.
+     */
+    private fun downsample(points: List<SessionTelemetryPoint>, target: Int): List<SessionTelemetryPoint> {
+        val bucketSize = (points.size + target - 1) / target
+        val out = ArrayList<SessionTelemetryPoint>(target)
+        var i = 0
+        while (i < points.size) {
+            val end = minOf(i + bucketSize, points.size)
+            var peak = points[i]
+            var anyAlert = false
+            for (j in i until end) {
+                val q = points[j]
+                if (q.score > peak.score) peak = q
+                if (q.alertActive) anyAlert = true
+            }
+            out.add(peak.copy(alertActive = anyAlert))
+            i = end
+        }
+        return out
     }
 
     private fun parseSummaryJson(json: String): SessionSummary? {

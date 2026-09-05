@@ -25,9 +25,11 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.navigation.navArgument
 import com.vigilia.app.data.repository.AuthRepository
 import com.vigilia.app.service.MonitoringService
 import com.vigilia.app.ui.auth.AuthScreen
@@ -37,6 +39,7 @@ import com.vigilia.app.ui.auth.ResetPasswordScreen
 import com.vigilia.app.terms.TermsConfig
 import com.vigilia.app.ui.history.HistoryScreen
 import com.vigilia.app.ui.history.HistoryViewModel
+import com.vigilia.app.ui.history.SessionDetailScreen
 import com.vigilia.app.ui.monitoring.MonitoringScreen
 import com.vigilia.app.ui.monitoring.MonitoringViewModel
 import com.vigilia.app.ui.options.OptionsScreen
@@ -56,6 +59,8 @@ sealed class Screen(val route: String, val label: String, val icon: androidx.com
 }
 
 private const val ROUTE_HISTORY = "history"
+private const val ROUTE_SESSION_DETAIL = "history/session"
+private const val ARG_SESSION_ID = "sessionId"
 private const val ROUTE_PROFILE = "options/profile"
 private const val ROUTE_TERMS_VIEW = "options/terms"
 private const val ROUTE_PRIVACY_VIEW = "options/privacy"
@@ -307,7 +312,23 @@ fun VigiliaNavGraph(
                 }
                 composable(ROUTE_HISTORY) {
                     val historyViewModel: HistoryViewModel = viewModel()
-                    HistoryScreen(viewModel = historyViewModel)
+                    HistoryScreen(
+                        viewModel = historyViewModel,
+                        onSessionClick = { sessionId ->
+                            navController.navigate("$ROUTE_SESSION_DETAIL/$sessionId")
+                        },
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+                composable(
+                    route = "$ROUTE_SESSION_DETAIL/{$ARG_SESSION_ID}",
+                    arguments = listOf(navArgument(ARG_SESSION_ID) { type = NavType.StringType }),
+                ) { backStackEntry ->
+                    val sessionId = backStackEntry.arguments?.getString(ARG_SESSION_ID).orEmpty()
+                    SessionDetailScreen(
+                        sessionId = sessionId,
+                        onBack = { navController.popBackStack() },
+                    )
                 }
             }
         }
