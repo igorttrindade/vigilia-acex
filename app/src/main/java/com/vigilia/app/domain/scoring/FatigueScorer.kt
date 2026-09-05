@@ -220,6 +220,38 @@ class FatigueScorer(
         const val MICROSLEEP_WARNING_MS = 3_000L
         const val MICROSLEEP_FATIGUED_MS = 6_000L
 
+        // Partial-closure detector — parallel safety net for the case where MediaPipe
+        // reports partially-closed eyes (openness 0.25-0.45) throughout a real closure
+        // instead of collapsing to <0.10. Seen in field test: driver held eyes closed
+        // for 60s but blendshape stayed in the 0.23-0.42 range (probably eyelash gap /
+        // face angle / lighting). Calibrated eyeClosedThreshold (~0.263) sat inside
+        // that fluctuation band, so the "raw closed" streak needed by the tight
+        // microsleep detector never sustained — and the tight detector never fired.
+        //
+        // Uses an ABSOLUTE threshold (not calibrated) because the failure mode is that
+        // the calibrated threshold is too strict for this specific input. Longer windows
+        // (5s / 8s) than the tight microsleep (3s / 6s) because partial closure is a
+        // weaker signal — a normal blink can look like ~0.4 openness for one frame, but
+        // never for 5 seconds. Gated on `!isLookingAway` so glancing at mirror/panel
+        // doesn't fire (though sustained head-down is itself a fatigue signal, we let
+        // the existing look-away FSM own that concern).
+        const val PARTIAL_CLOSURE_THRESHOLD = 0.45f
+        const val PARTIAL_CLOSURE_WARNING_MS = 5_000L
+        const val PARTIAL_CLOSURE_FATIGUED_MS = 8_000L
+
+        // Progressive-contribution mapping for both closure detectors (tight microsleep
+        // and partial). Instead of jump-cutting the score to 60/85 at the promotion
+        // instant (jarring UX: "score sat at 14, then alarm, then jumped to 60, then
+        // fell back to 14 in a blink"), we add a *ramped* contribution to the raw score
+        // that climbs linearly from 0 to WARNING as the timer approaches its threshold,
+        // then to FATIGUED. The existing smoothing (alpha=0.2) turns the raw ramp into
+        // a visibly gradual on-screen climb. When the closure ends, we hold the peak
+        // for CLOSURE_DECAY_MS and linearly decay to 0 — matching the yawn pattern
+        // (YAWN_HOLD_MS + YAWN_DECAY_MS) so the score falls at the same rate it climbed.
+        const val CLOSURE_CONTRIB_WARNING = 60f
+        const val CLOSURE_CONTRIB_FATIGUED = 85f
+        const val CLOSURE_DECAY_MS = 3_000L
+
         // Pre-calibration microsleep safety net. If the driver already has their eyes
         // closed at Start (or falls asleep during the ~10 s calibration window), the
         // main-path microsleep detector is unreachable — the calibration block returns
@@ -303,11 +335,18 @@ class FatigueScorer(
     // detector below.
     private var continuousClosureStartMs: Long = -1L
 
-    // Consecutive-closed-frame counter for the pre-calibration microsleep safety net.
-    // Kept separate from perclosConsecutiveClosedCount because the safety net uses a
-    // different (stricter) threshold (MICROSLEEP_PRECAL_THRESHOLD = 0.20) and runs before
-    // the main-path debounce.
-    private var precalConsecClosed = 0
+    // Parallel timer for the partial-closure detector. Anchored on the first frame where
+    // eye openness dips below PARTIAL_CLOSURE_THRESHOLD (absolute, not calibrated).
+    // Reset when openness recovers OR when look-away is detected. See the constants above
+    // for the field-test motivation.
+    private var partialClosureStartMs: Long = -1L
+
+    // Held peak of the closure contribution — captured at the moment a closure timer
+    // releases (open frame or NO_FACE). Used to decay the visible score gradually
+    // instead of collapsing on the next frame.
+    private var closurePeakContribution: Float = 0f
+    private var closureReleaseTimeMs: Long = -1L
+
     // Latched true when the pre-calibration safety net fires and promotes state. Prevents
     // re-entering CALIBRATING for the rest of the session — the driver just got an alarm,
     // any samples they'd contribute now (adrenalized, over-focused) would be non-
@@ -332,33 +371,45 @@ class FatigueScorer(
             // continuousClosureStartMs stays -1L if the last classified frame was open
             // or the closure hadn't debounced yet, so this cannot promote a legitimate
             // "user left the frame with eyes open" case.
-            if (continuousClosureStartMs >= 0L) {
-                val closureMs = now - continuousClosureStartMs
-                val microsleepState = when {
-                    closureMs >= MICROSLEEP_FATIGUED_MS -> FatigueState.FATIGUED
-                    closureMs >= MICROSLEEP_WARNING_MS  -> FatigueState.WARNING
-                    else -> null
-                }
-                if (microsleepState != null) {
-                    currentState = microsleepState
-                    targetState = null
-                    transitionAccumulatedMs = 0L
-                    transitionLastCheckMs = 0L
-                    // Force smoothedScore into the corresponding band so the CSV/UI
-                    // reflect the promotion. MonitoringService.handleAssessment alerts
-                    // on state transitions, so this is belt-and-suspenders.
-                    val forcedScore = if (microsleepState == FatigueState.FATIGUED) 85f else 60f
-                    smoothedScore = maxOf(smoothedScore, forcedScore)
-                    return createAssessment(
-                        score = smoothedScore,
-                        timestampMs = now,
-                        isFaceDetected = false,
-                        blinkRate = blinkTimestamps.size.toFloat(),
-                        isYawning = isCurrentlyYawning,
-                    )
-                }
+            // Combined promotion: whichever of the two timers has crossed its threshold
+            // wins (max-severity). Both must be honoured through NO_FACE so a driver who
+            // was already showing (partial or full) closure at the moment MediaPipe lost
+            // the face still gets an alarm.
+            val closureMs = if (continuousClosureStartMs >= 0L) now - continuousClosureStartMs else -1L
+            val partialMs = if (partialClosureStartMs >= 0L) now - partialClosureStartMs else -1L
+            val microsleepState = when {
+                closureMs >= MICROSLEEP_FATIGUED_MS -> FatigueState.FATIGUED
+                closureMs >= MICROSLEEP_WARNING_MS -> FatigueState.WARNING
+                else -> null
             }
-
+            val partialState = when {
+                partialMs >= PARTIAL_CLOSURE_FATIGUED_MS -> FatigueState.FATIGUED
+                partialMs >= PARTIAL_CLOSURE_WARNING_MS -> FatigueState.WARNING
+                else -> null
+            }
+            val forcedState = when {
+                microsleepState == FatigueState.FATIGUED || partialState == FatigueState.FATIGUED -> FatigueState.FATIGUED
+                microsleepState == FatigueState.WARNING || partialState == FatigueState.WARNING -> FatigueState.WARNING
+                else -> null
+            }
+            if (forcedState != null) {
+                currentState = forcedState
+                targetState = null
+                transitionAccumulatedMs = 0L
+                transitionLastCheckMs = 0L
+                // Force smoothedScore into the corresponding band so the CSV/UI
+                // reflect the promotion. MonitoringService.handleAssessment alerts
+                // on state transitions, so this is belt-and-suspenders.
+                val forcedScore = if (forcedState == FatigueState.FATIGUED) 85f else 60f
+                smoothedScore = maxOf(smoothedScore, forcedScore)
+                return createAssessment(
+                    score = smoothedScore,
+                    timestampMs = now,
+                    isFaceDetected = false,
+                    blinkRate = blinkTimestamps.size.toFloat(),
+                    isYawning = isCurrentlyYawning,
+                )
+            }
             return if (noFaceDuration >= currentNoFaceGraceMs()) {
                 // Sustained absence — mark NO_FACE but PRESERVE the detection buffers.
                 // Was clearing them here + resetting smoothedScore to 0, which had two
@@ -384,7 +435,6 @@ class FatigueScorer(
                 calibrationEligibleSinceMs = -1L
                 firstCalibrationFrameMs = -1L
                 calibrationBelowCount = 0
-                precalConsecClosed = 0
                 createAssessment(0f, now, false, blinkTimestamps.size.toFloat(), isCurrentlyYawning)
             } else {
                 // Brief glitch — hold current state so detection progress isn't lost
@@ -414,13 +464,17 @@ class FatigueScorer(
             val earlyLookingAway = kotlin.math.abs(metrics.headYawDegrees) > LOOK_AWAY_YAW_DEGREES ||
                     metrics.headPitchDegrees > LOOK_AWAY_PITCH_DEGREES_UP ||
                     metrics.headPitchDegrees < -LOOK_AWAY_PITCH_DEGREES_DOWN
+            // Anchor the microsleep timer on the FIRST raw-closed frame (no debounce).
+            // Field test bug: driver closed eyes for 20s and no alarm fired because
+            // MediaPipe drops face detection when eyelids are fully down (blendshapes
+            // become null → NO_FACE), often before a debounce of 2 frames completes.
+            // If the timer isn't armed by that point, the microsleep-through-NO_FACE
+            // override skips. The 3s/6s thresholds are themselves the specificity gate
+            // — a single noise frame simply resets on the next open frame and cannot
+            // reach 3s of continuous closure.
             if (!earlyLookingAway && eyeOpenness < MICROSLEEP_PRECAL_THRESHOLD) {
-                precalConsecClosed++
-                if (precalConsecClosed >= PERCLOS_MIN_CLOSED_FRAMES && continuousClosureStartMs < 0L) {
-                    continuousClosureStartMs = currentTime
-                }
+                if (continuousClosureStartMs < 0L) continuousClosureStartMs = currentTime
             } else {
-                precalConsecClosed = 0
                 continuousClosureStartMs = -1L
             }
             if (continuousClosureStartMs >= 0L) {
@@ -560,8 +614,9 @@ class FatigueScorer(
             )
             // Clear microsleep timer: while looking away, head-pose is off-axis and eye
             // blendshapes are noisy — don't extend a "continuous closure" streak with
-            // frames we're not measuring reliably.
+            // frames we're not measuring reliably. Same reasoning for partial closure.
             continuousClosureStartMs = -1L
+            partialClosureStartMs = -1L
         }
 
         // While LOOKING AWAY: two sub-paths depending on duration.
@@ -588,6 +643,7 @@ class FatigueScorer(
                 isBlinking = false
                 blinkStartTime = null
                 continuousClosureStartMs = -1L
+                partialClosureStartMs = -1L
                 // Yawn timers intentionally NOT reset — if the driver was mid-yawn when the
                 // time-limit hit, the timer keeps counting and the yawn confirms shortly after.
                 lookAwayStartTime = -1L
@@ -651,13 +707,34 @@ class FatigueScorer(
             false
         }
 
-        // Microsleep tracking — anchor a timestamp on the first debounced-closed frame of
-        // the current streak. A single open frame breaks the streak. See the override block
-        // after updateState() for how this drives categorical WARNING/FATIGUED promotion.
-        if (debouncedEyeClosed) {
+        // Microsleep tracking — anchor a timestamp on the first RAW-closed frame of the
+        // current streak (deliberately not debounced). Field test showed that MediaPipe
+        // frequently loses face detection when eyelids are fully down (blendshapes go
+        // null, treated as NO_FACE in FaceAnalyzer) — often within the 1-2 frames the
+        // debounce needed to complete. If the timer wasn't armed by then, the three
+        // microsleep safety nets (pre-cal, through-NO_FACE, main-path) all skip because
+        // they gate on `continuousClosureStartMs >= 0L`. Result: 20s of eyes closed with
+        // no alarm. Arming on the raw frame is safe — a single open frame resets the
+        // streak, and the 3s/6s WARNING/FATIGUED thresholds themselves filter out any
+        // sub-second noise. `debouncedEyeClosed` continues to feed perclosWindow below
+        // so PERCLOS accounting is still shielded from single-frame classification jitter.
+        if (rawEyeClosed) {
             if (continuousClosureStartMs < 0L) continuousClosureStartMs = currentTime
         } else {
             continuousClosureStartMs = -1L
+        }
+
+        // Partial-closure timer — parallel to the tight microsleep timer above, uses an
+        // ABSOLUTE threshold. Catches the case where MediaPipe reports eye openness in
+        // the 0.25-0.45 band throughout a real closure (see field-test row 58-70 with
+        // 26s of eyeOpen 0.23-0.42 that produced no alarm because it was above the
+        // calibrated ~0.263 threshold most of the time). The 5s/8s window is long
+        // enough to filter blinks (~250 ms) and quick glances, so no false-positive
+        // exposure vs the tight microsleep detector.
+        if (eyeOpenness < PARTIAL_CLOSURE_THRESHOLD) {
+            if (partialClosureStartMs < 0L) partialClosureStartMs = currentTime
+        } else {
+            partialClosureStartMs = -1L
         }
 
         // 1. PERCLOS Calculation — buffer add + drain by age. We only reach here when NOT
@@ -765,7 +842,13 @@ class FatigueScorer(
             }
         } ?: 0f
 
-        val rawScore = perclosContribution + blinkContribution + yawnContribution
+        // Closure contribution — progressive ramp while either closure timer is armed,
+        // then linear decay after release. Feeds the raw score so the visible number
+        // climbs and falls smoothly through the same smoothing that the other signals
+        // use, instead of being step-forced by the promotion blocks below.
+        val closureContribution = computeClosureContribution(currentTime)
+
+        val rawScore = perclosContribution + blinkContribution + yawnContribution + closureContribution
         smoothedScore = (SMOOTHING_ALPHA * rawScore) + (1f - SMOOTHING_ALPHA) * smoothedScore
 
         Log.d("FatigueScorer", "score=$smoothedScore state=$currentState perclos=$perclos blinkRate=$blinkRate yawning=$isCurrentlyYawning lookAway=$isLookingAway yaw=${metrics.headYawDegrees} pitch=${metrics.headPitchDegrees}")
@@ -792,13 +875,31 @@ class FatigueScorer(
                 }
                 targetState = null
                 transitionAccumulatedMs = 0L
-                // Mirror the NO_FACE microsleep path (lines 319-336): force smoothedScore
-                // into the corresponding band so the on-screen number and the CSV `score`
-                // column reflect the promotion. Without this, the alarm rings while the
-                // UI shows a low integer (or "0") because PERCLOS's 30 s window hasn't
-                // drained enough of the pre-closure open frames yet.
-                val forcedScore = if (microsleepState == FatigueState.FATIGUED) 85f else 60f
-                smoothedScore = maxOf(smoothedScore, forcedScore)
+                // Score itself was already lifted by closureContribution above; no
+                // maxOf(smoothedScore, 60/85) needed here. The FSM update is what
+                // categorically promotes to WARNING/FATIGUED so alerts fire on time.
+            }
+        }
+
+        // 7. Partial-closure override — parallel safety net for the case where the tight
+        // microsleep detector above never armed because MediaPipe blendshape hovered in
+        // the 0.25-0.45 range instead of collapsing to <0.10. Same promotion pattern as
+        // the microsleep override but with a longer window (5s/8s vs 3s/6s) since partial
+        // closure is a weaker signal. Only elevates state; cannot demote.
+        if (partialClosureStartMs >= 0L) {
+            val partialMs = currentTime - partialClosureStartMs
+            val partialState = when {
+                partialMs >= PARTIAL_CLOSURE_FATIGUED_MS -> FatigueState.FATIGUED
+                partialMs >= PARTIAL_CLOSURE_WARNING_MS -> FatigueState.WARNING
+                else -> null
+            }
+            if (partialState != null) {
+                if (stateSeverity(partialState) > stateSeverity(currentState)) {
+                    currentState = partialState
+                }
+                targetState = null
+                transitionAccumulatedMs = 0L
+                // Score itself is lifted by closureContribution in the raw sum above.
             }
         }
 
@@ -846,8 +947,63 @@ class FatigueScorer(
         lookAwayStartTime = -1L
         lookAwayFrozenAssessment = null
         continuousClosureStartMs = -1L
-        precalConsecClosed = 0
+        partialClosureStartMs = -1L
+        closurePeakContribution = 0f
+        closureReleaseTimeMs = -1L
         calibrationAborted = false
+    }
+
+    /**
+     * Computes the current closure contribution to the raw score. Two-phase behavior:
+     *
+     *   1. **Active phase** — one of the closure timers is armed. Contribution ramps
+     *      linearly from 0 → CLOSURE_CONTRIB_WARNING (60) as the timer approaches its
+     *      WARNING threshold, then from 60 → CLOSURE_CONTRIB_FATIGUED (85) between
+     *      WARNING and FATIGUED thresholds. Uses max() of the two detectors so the
+     *      tighter (faster) one dominates when both are armed. Caches the peak for the
+     *      decay phase.
+     *   2. **Decay phase** — both timers are released. Contribution decays linearly from
+     *      the peak to 0 across CLOSURE_DECAY_MS, so the visible score falls at the
+     *      same feel as it climbed instead of snapping back to baseline in one frame.
+     */
+    private fun computeClosureContribution(currentTime: Long): Float {
+        val activeContribution = maxOf(
+            rampContribution(continuousClosureStartMs, currentTime, MICROSLEEP_WARNING_MS, MICROSLEEP_FATIGUED_MS),
+            rampContribution(partialClosureStartMs, currentTime, PARTIAL_CLOSURE_WARNING_MS, PARTIAL_CLOSURE_FATIGUED_MS),
+        )
+
+        if (activeContribution > 0f) {
+            closurePeakContribution = activeContribution
+            closureReleaseTimeMs = -1L
+            return activeContribution
+        }
+
+        // No active timer — either never armed, or just released. If we had a peak,
+        // decay it linearly over CLOSURE_DECAY_MS. Once decayed below 0.5, clean up.
+        if (closurePeakContribution <= 0f) return 0f
+        if (closureReleaseTimeMs < 0L) closureReleaseTimeMs = currentTime
+        val decayElapsed = currentTime - closureReleaseTimeMs
+        val decayFraction = (1f - decayElapsed.toFloat() / CLOSURE_DECAY_MS.toFloat()).coerceIn(0f, 1f)
+        val decayed = closurePeakContribution * decayFraction
+        if (decayed < 0.5f) {
+            closurePeakContribution = 0f
+            closureReleaseTimeMs = -1L
+            return 0f
+        }
+        return decayed
+    }
+
+    private fun rampContribution(startMs: Long, currentTime: Long, warningMs: Long, fatiguedMs: Long): Float {
+        if (startMs < 0L) return 0f
+        val elapsed = currentTime - startMs
+        return when {
+            elapsed >= fatiguedMs -> CLOSURE_CONTRIB_FATIGUED
+            elapsed >= warningMs -> {
+                val progress = (elapsed - warningMs).toFloat() / (fatiguedMs - warningMs).toFloat()
+                CLOSURE_CONTRIB_WARNING + (CLOSURE_CONTRIB_FATIGUED - CLOSURE_CONTRIB_WARNING) * progress
+            }
+            else -> (elapsed.toFloat() / warningMs.toFloat()) * CLOSURE_CONTRIB_WARNING
+        }
     }
 
     private fun finishCalibration() {
