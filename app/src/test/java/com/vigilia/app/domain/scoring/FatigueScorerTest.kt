@@ -264,26 +264,34 @@ class FatigueScorerTest {
     @Test
     fun `calibration falls back after 3s of bad framing`() {
         // Persistently bad framing (glasses reflection, harsh lighting) — openness stays
-        // at 0.1. Stabilization can never converge, but the CALIBRATION_STABILIZATION_MAX_MS
-        // safety net must force sample collection after 3 s so calibration doesn't stall
-        // indefinitely.
+        // in the 0.20-0.35 ambiguous band. Below CALIBRATION_STABILIZATION_MIN_OPENNESS
+        // (0.35) so the stabilization gate can never converge, but above
+        // MICROSLEEP_PRECAL_THRESHOLD (0.20) so the pre-calibration safety net does NOT
+        // fire. The CALIBRATION_STABILIZATION_MAX_MS fallback must force sample collection
+        // after 3 s so calibration doesn't stall indefinitely.
+        //
+        // Note: this test used to use openness = 0.1, but that value is semantically
+        // "eyes closed" (below the PERCLOS default 0.30 and the safety-net threshold 0.20).
+        // A driver whose readings are that low for 3 s straight should get an alarm, not
+        // a silent calibration retry — so we test bad framing with a more realistic
+        // "narrow-eyed / partial reflection" value.
         val calibratingScorer = FatigueScorer(calibrationEnabled = true)
         var t = 1000L
 
-        // 3 s of persistently low openness — every frame stays in stabilization, progress=0.
+        // 3 s of persistently sub-gate openness — every frame stays in stabilization, progress=0.
         val startT = t
         while (t - startT < 3000L) {
-            val a = calibratingScorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, t))
+            val a = calibratingScorer.processFrame(FatigueMetrics(0.25f, 0.25f, 0.1f, true, t))
             assertEquals(FatigueState.CALIBRATING, a.fatigueState)
             assertEquals("progress must stay 0 while gate hasn't force-started", 0f, a.calibrationProgress, 0.001f)
             t += 100
         }
         // Frame at t = startT + 3000: force-start fires here, calibrationStartMs=this frame,
         // so elapsed=0 and progress=0 on this exact frame.
-        calibratingScorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, t))
+        calibratingScorer.processFrame(FatigueMetrics(0.25f, 0.25f, 0.1f, true, t))
         t += 100
         // Next frame: elapsed>0 confirms the fallback made collection start.
-        val progressing = calibratingScorer.processFrame(FatigueMetrics(0.1f, 0.1f, 0.1f, true, t))
+        val progressing = calibratingScorer.processFrame(FatigueMetrics(0.25f, 0.25f, 0.1f, true, t))
         assertEquals(FatigueState.CALIBRATING, progressing.fatigueState)
         assertTrue(
             "Fallback must kick in after 3 s — progress should be > 0 (got ${progressing.calibrationProgress})",
@@ -1059,31 +1067,397 @@ class FatigueScorerTest {
     }
 
     @Test
-    fun `NO_FACE grace clears microsleep timer`() {
-        // 2 s of closure, then 1 s of NO_FACE (past 500 ms grace → buffers cleared incl.
-        // microsleep timer), then 2 s more closure. Neither half alone crosses 3 s so
-        // state stays NORMAL.
+    fun `microsleep timer survives NO_FACE and promotes to WARNING once closure crosses 3s`() {
+        // Field bug: driver's eyes stayed closed for ~10 s and the alarm was late because
+        // MediaPipe drops face detection when eyelids are fully down (the model relies on
+        // eye landmarks to consolidate the face). With detection lost, the PERCLOS-based
+        // FSM never runs, so the score-based promotion path is silent. The microsleep
+        // detector now runs INSIDE the NO_FACE branch too, using the already-anchored
+        // continuousClosureStartMs — so a sustained closure that starts detected and
+        // continues past the detection loss still fires within the 3 s window.
+        //
+        // Pattern: 0.4 s of closure with face → 0.7 s of NO_FACE → 2.5 s of closure back.
+        // Cumulative closure since anchor > 3 s → WARNING.
         var t = 0L
-        repeat(20) {
+        // 4 face-detected closed frames — enough for debounce to confirm (>= 2 consecutive)
+        // so continuousClosureStartMs anchors at ~t=100.
+        repeat(4) {
             scorer.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, t))
             t += 100
         }
-        // Face absent for 1 s — 10 frames at 100 ms; grace is 500 ms so buffers get cleared.
-        repeat(10) {
-            scorer.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, false, t))
+        // 0.7 s of NO_FACE — past the 500 ms grace, so the branch runs the NO_FACE path.
+        // Microsleep check inside the branch sees closureMs 300-1000, below 3 s → no promotion.
+        repeat(7) {
+            val a = scorer.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, false, t))
+            // NO_FACE grace is 500 ms. NO_FACE loop started at t=400 → transitions to
+            // NO_FACE at t=900+ (noFaceDuration >= 500). Before that, brief-glitch path
+            // holds current state. Assert NO_FACE only after grace has expired.
+            if (t >= 900) {
+                assertEquals(
+                    "State must be NO_FACE while closure has not yet crossed microsleep threshold (t=$t)",
+                    FatigueState.NO_FACE,
+                    a.fatigueState,
+                )
+            }
             t += 100
         }
-        // Face returns, eyes closed again.
-        var last = scorer.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, t))
-        t += 100
-        repeat(24) {
-            last = scorer.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, t))
+        // Face returns, eyes still closed. Continuous closure anchored at t=100; at this
+        // point cumulative time = t - 100. WARNING must fire before or at closureMs=3000.
+        var reachedWarning = false
+        var last = FatigueState.NO_FACE
+        repeat(30) {
+            last = scorer.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, t)).fatigueState
+            if (last == FatigueState.WARNING || last == FatigueState.FATIGUED) reachedWarning = true
+            t += 100
+        }
+        assertTrue(
+            "Microsleep detector must fire despite the NO_FACE gap (final=$last)",
+            reachedWarning,
+        )
+    }
+
+    @Test
+    fun `microsleep timer inside NO_FACE promotes directly at 6s without face returning`() {
+        // Even more aggressive scenario: the driver falls asleep and detection never
+        // recovers within the alarm window. The microsleep check must promote to at
+        // least WARNING while still inside the NO_FACE branch.
+        var t = 0L
+        // Anchor the closure — 4 face-detected closed frames (past the 2-frame debounce)
+        repeat(4) {
+            scorer.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, t))
+            t += 100
+        }
+        // 6.5 s of NO_FACE with closure timer alive from t≈100. closureMs ends near 6.4 s
+        // → FATIGUED threshold (6 s) reached.
+        var last = FatigueState.NO_FACE
+        repeat(65) {
+            last = scorer.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, false, t)).fatigueState
+            t += 100
+        }
+        assertTrue(
+            "Sustained closure through prolonged NO_FACE must reach WARNING or FATIGUED (final=$last)",
+            last == FatigueState.WARNING || last == FatigueState.FATIGUED,
+        )
+    }
+
+    @Test
+    fun `NO_FACE after open eyes does not trigger microsleep alarm`() {
+        // Guardrail: the microsleep-through-NO_FACE promotion must only fire when the
+        // closure timer was already alive. A driver who simply leaves the frame (or the
+        // camera gets covered) with eyes OPEN must not receive a fatigue alarm.
+        var t = 0L
+        // 4 face-detected OPEN frames — closure timer stays at -1.
+        repeat(4) {
+            scorer.processFrame(FatigueMetrics(0.9f, 0.9f, 0.1f, true, t))
+            t += 100
+        }
+        // 10 s of NO_FACE — timer stays inactive because closure never anchored.
+        var last = FatigueState.NORMAL
+        repeat(100) {
+            last = scorer.processFrame(FatigueMetrics(0.9f, 0.9f, 0.1f, false, t)).fatigueState
             t += 100
         }
         assertEquals(
-            "NO_FACE grace should reset microsleep timer; ~2.5s post-return must not fire WARNING (got ${last.fatigueState})",
+            "NO_FACE preceded by open eyes must never promote to WARNING/FATIGUED (got $last)",
+            FatigueState.NO_FACE,
+            last,
+        )
+    }
+
+    @Test
+    fun `blink buffer survives brief NO_FACE so blink deviation is not falsely penalized`() {
+        // Field bug (secondary symptom): after a NO_FACE glitch during a running session,
+        // the score climbed from 0 → 40 in NORMAL even with eyes open. Root cause: the
+        // NO_FACE branch was clearing blinkTimestamps while monitoringStartMs was already
+        // past the 30 s warmup — so blinkRate=0 fed calculateBlinkDeviationScore → max
+        // deviation → 10-pt penalty applied continuously. With the buffer preserved,
+        // the blink history persists across the glitch and the penalty stays sane.
+        val s = FatigueScorer(calibrationEnabled = false)
+        var t = 1000L
+        // Warmup: 40 s with a healthy 20 blinks/min pattern (1 blink every 3 s of open frames).
+        // Each blink = 5 closed frames at ~150 ms; each interval = 25 open frames at ~100 ms.
+        // Feed for enough time that BLINK_MIN_OBSERVATION_MS (30 s) is well past.
+        repeat(14) { // 14 cycles × ~3 s ≈ 42 s
+            repeat(25) { s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t)); t += 100 }
+            repeat(5)  { s.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, t)); t += 100 }
+        }
+        val preNoFace = s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t))
+        assertTrue(
+            "Precondition: healthy blink rate must be near 20/min (got ${preNoFace.blinkRate})",
+            preNoFace.blinkRate >= 10f,
+        )
+        t += 100
+        // 2 s of NO_FACE — past the 500 ms grace, state transitions to NO_FACE. Under the
+        // OLD behavior blinkTimestamps was cleared here; under the new behavior it is
+        // preserved and the entries drain naturally by age (60 s window).
+        repeat(20) {
+            s.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, false, t))
+            t += 100
+        }
+        // Face returns with eyes open. First few post-recovery frames must NOT have a
+        // spurious blink-deviation penalty from an empty blinkTimestamps buffer.
+        var maxBlinkContribution = 0f
+        repeat(30) {
+            val a = s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t))
+            maxBlinkContribution = maxOf(maxBlinkContribution, a.blinkContribution)
+            t += 100
+        }
+        assertTrue(
+            "blinkContribution must stay well below 10 pts right after NO_FACE recovery " +
+                    "(got max=$maxBlinkContribution). Under the OLD behavior this would sit " +
+                    "at the max 10-pt penalty because blinkTimestamps was cleared.",
+            maxBlinkContribution < 5f,
+        )
+    }
+
+    @Test
+    fun `perclos buffer survives brief NO_FACE so history is not lost on recovery`() {
+        // Corollary of the buffer-preservation change: after a brief detection gap the
+        // recent PERCLOS history must survive so a real ongoing closure (e.g. driver
+        // still drowsy after alarm) is not artificially masked by an empty buffer.
+        val s = FatigueScorer(calibrationEnabled = false)
+        var t = 0L
+        // Drive 4 s of intermittent closure — perclosWindow accumulates real data.
+        repeat(4) {
+            repeat(6) { s.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, t)); t += 100 }
+            repeat(4) { s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t)); t += 100 }
+        }
+        val prePerclos = s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t)).perclos
+        t += 100
+        // 1.5 s of NO_FACE — grace expires, transitions to NO_FACE.
+        repeat(15) {
+            s.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, false, t))
+            t += 100
+        }
+        // Face returns, eyes open. PERCLOS must be non-zero-and-decreasing (reflecting
+        // the preserved history draining by age) rather than a hard reset to 0.
+        val postPerclos = s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t)).perclos
+        assertTrue(
+            "PERCLOS history must survive brief NO_FACE (pre=$prePerclos post=$postPerclos)",
+            postPerclos > 0f || prePerclos == 0f,
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // Pre-calibration microsleep safety net + main-path smoothedScore force.
+    //
+    // Field bug that motivated these tests: driver started monitoring with eyes
+    // already closed → first alarm took 10-20 s (calibration blocks the main
+    // microsleep path). Separately: after the alarm fired, the on-screen score
+    // read as 0 because the main microsleep block promoted state without
+    // forcing smoothedScore up.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun `eyes closed at Start reach WARNING within 3-4s despite calibration`() {
+        // Driver hits Start with eyes already closed. Under the OLD behavior the
+        // main-path microsleep detector was unreachable during the ~10 s calibration
+        // window, so the first alarm arrived 10-20 s later. The pre-calibration
+        // safety net must catch this within ~3 s.
+        val s = FatigueScorer(calibrationEnabled = true)
+        var t = 0L
+        var reachedDanger = false
+        var scoreAtDanger = 0f
+        var timeAtDanger = 0L
+        // 4.5 s of continuous closure at 30 fps (33 ms/frame). WARNING must fire
+        // by ~3.1 s (2-frame debounce + 3 s MICROSLEEP_WARNING_MS).
+        repeat(135) {
+            val a = s.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, t))
+            if (!reachedDanger &&
+                (a.fatigueState == FatigueState.WARNING || a.fatigueState == FatigueState.FATIGUED)) {
+                reachedDanger = true
+                scoreAtDanger = a.score
+                timeAtDanger = t
+            }
+            t += 33
+        }
+        assertTrue(
+            "Pre-calibration safety net must promote to WARNING within ~4 s (reached=$reachedDanger at t=$timeAtDanger ms)",
+            reachedDanger && timeAtDanger <= 4_000L,
+        )
+        assertTrue(
+            "smoothedScore must be forced into the WARNING band (>=60) when the safety net fires (got $scoreAtDanger)",
+            scoreAtDanger >= 60f,
+        )
+    }
+
+    @Test
+    fun `eyes closed at Start reach FATIGUED at 6s`() {
+        // Escalation path: closure past MICROSLEEP_FATIGUED_MS (6 s) must promote
+        // straight to FATIGUED with the corresponding forced score band.
+        val s = FatigueScorer(calibrationEnabled = true)
+        var t = 0L
+        var last = FatigueState.NORMAL
+        var lastScore = 0f
+        // 7 s of continuous closure at 30 fps.
+        repeat(210) {
+            val a = s.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, t))
+            last = a.fatigueState
+            lastScore = a.score
+            t += 33
+        }
+        assertEquals(
+            "Sustained 7 s closure at Start must reach FATIGUED via the pre-calibration safety net (got $last)",
+            FatigueState.FATIGUED,
+            last,
+        )
+        assertTrue(
+            "smoothedScore must be forced into the FATIGUED band (>=85) when the safety net escalates (got $lastScore)",
+            lastScore >= 85f,
+        )
+    }
+
+    @Test
+    fun `brief closure during calibration does not abort the safety net`() {
+        // Guardrail: a 1 s closure (well under the 3 s microsleep window) followed
+        // by normal open eyes must NOT abort calibration. This is what happens if
+        // the driver blinks harder than usual at startup — the safety net must not
+        // fire and calibration must complete normally.
+        val s = FatigueScorer(calibrationEnabled = true)
+        var t = 0L
+        // 1 s of closure (30 frames) — below the 3 s microsleep window.
+        repeat(30) {
+            val a = s.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, t))
+            assertTrue(
+                "State must stay CALIBRATING during the 1 s closure (got ${a.fatigueState} at t=$t)",
+                a.fatigueState == FatigueState.CALIBRATING || a.fatigueState == FatigueState.NORMAL,
+            )
+            t += 33
+        }
+        // 10 s of eyes open — allows the stabilization gate to converge and the
+        // 7 s collection window to complete. Calibration should finish and state
+        // should be NORMAL (no false WARNING).
+        var last = FatigueState.CALIBRATING
+        repeat(300) {
+            last = s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t)).fatigueState
+            t += 33
+        }
+        assertEquals(
+            "After 1 s closure + 10 s open, state must be NORMAL — calibration should complete without the safety net firing (got $last)",
             FatigueState.NORMAL,
-            last.fatigueState,
+            last,
+        )
+    }
+
+    @Test
+    fun `looking away during calibration does not trigger safety net`() {
+        // Driver glances at the passenger for 4 s while their eyes read as "closed"
+        // due to oblique perspective on the blendshapes. Yaw > 25° must block the
+        // safety net's anchor so no false alarm fires.
+        val s = FatigueScorer(calibrationEnabled = true)
+        var t = 0L
+        var last = FatigueState.NORMAL
+        // 4 s of "closed" eyes but with head yaw 30° (past LOOK_AWAY_YAW_DEGREES=25).
+        repeat(120) {
+            last = s.processFrame(
+                FatigueMetrics(
+                    leftEyeOpenProbability = 0.05f,
+                    rightEyeOpenProbability = 0.05f,
+                    mouthOpenProbability = 0.1f,
+                    isFaceDetected = true,
+                    timestampMs = t,
+                    headYawDegrees = 30f,
+                ),
+            ).fatigueState
+            t += 33
+        }
+        assertTrue(
+            "Look-away must block the pre-calibration safety net anchor (got $last)",
+            last == FatigueState.CALIBRATING || last == FatigueState.NORMAL,
+        )
+    }
+
+    @Test
+    fun `narrow-eyed driver during calibration does not false-alert`() {
+        // Baseline openness 0.25 sits between MICROSLEEP_PRECAL_THRESHOLD (0.20) and
+        // the PERCLOS default (0.30) — represents a narrow-eyed driver whose
+        // "eyes fully open" reads low on the MediaPipe blendshape. Safety net must
+        // not treat this as microsleep. Calibration continues normally (once the
+        // stabilization gate converges — openness 0.25 is below the 0.35 gate so
+        // it won't converge here, but the safety net still must not fire).
+        val s = FatigueScorer(calibrationEnabled = true)
+        var t = 0L
+        var last = FatigueState.NORMAL
+        // 4 s of "eyes ambiguously open" (0.25) — above the safety-net threshold.
+        repeat(120) {
+            last = s.processFrame(FatigueMetrics(0.25f, 0.25f, 0.1f, true, t)).fatigueState
+            t += 33
+        }
+        assertTrue(
+            "Narrow-eyed baseline (openness=0.25) must not trigger the safety net (got $last)",
+            last == FatigueState.CALIBRATING,
+        )
+    }
+
+    @Test
+    fun `main-path microsleep forces smoothedScore into WARNING band`() {
+        // Fix 2: the main-path microsleep block (post-calibration) must also force
+        // smoothedScore up when it promotes state. Otherwise the alarm fires with
+        // the on-screen number stuck at 0 because PERCLOS (30 s window) hasn't
+        // drained enough of the pre-closure open frames yet.
+        //
+        // Set up calibrationEnabled=false to skip the safety net entirely and hit
+        // the main microsleep path. Feed 30 s of eyes-open, healthy blinks (fills
+        // perclosWindow and blinkTimestamps with realistic data), then close eyes
+        // for 4 s to trigger the main-path microsleep.
+        val s = FatigueScorer(calibrationEnabled = false)
+        var t = 0L
+        // 30 s warmup with a healthy blink pattern (1 blink every ~3 s).
+        repeat(10) {
+            repeat(25) { s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t)); t += 100 }
+            repeat(5)  { s.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, t)); t += 100 }
+        }
+        val pre = s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t))
+        t += 100
+        assertTrue(
+            "Precondition: state must be NORMAL before the closure begins (got ${pre.fatigueState})",
+            pre.fatigueState == FatigueState.NORMAL,
+        )
+        // 4 s of continuous closure — main-path microsleep must promote to WARNING
+        // and force smoothedScore >= 60.
+        var scoreAtWarning = -1f
+        var stateAtWarning = FatigueState.NORMAL
+        repeat(40) {
+            val a = s.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, t))
+            if (scoreAtWarning < 0f && (a.fatigueState == FatigueState.WARNING || a.fatigueState == FatigueState.FATIGUED)) {
+                scoreAtWarning = a.score
+                stateAtWarning = a.fatigueState
+            }
+            t += 100
+        }
+        assertTrue(
+            "Main-path microsleep must promote to WARNING within 4 s of closure (got state=$stateAtWarning)",
+            stateAtWarning == FatigueState.WARNING || stateAtWarning == FatigueState.FATIGUED,
+        )
+        assertTrue(
+            "Fix 2: main-path microsleep must force smoothedScore >= 60 at promotion (got $scoreAtWarning)",
+            scoreAtWarning >= 60f,
+        )
+    }
+
+    @Test
+    fun `aborted calibration does not re-enter CALIBRATING when eyes reopen`() {
+        // After the safety net fires, calibrationAborted latches true — the driver
+        // is now in the FSM's normal flow with default thresholds. Re-entering
+        // CALIBRATING mid-session would be surprising and would suppress scoring
+        // for another 10 s. Verify state never rewinds to CALIBRATING.
+        val s = FatigueScorer(calibrationEnabled = true)
+        var t = 0L
+        // 4 s of closure — triggers the safety net.
+        repeat(120) {
+            s.processFrame(FatigueMetrics(0.05f, 0.05f, 0.1f, true, t))
+            t += 33
+        }
+        // 10 s of eyes open — must NOT go back to CALIBRATING.
+        var everCalibratedAgain = false
+        repeat(300) {
+            val a = s.processFrame(FatigueMetrics(0.85f, 0.85f, 0.1f, true, t))
+            if (a.fatigueState == FatigueState.CALIBRATING) everCalibratedAgain = true
+            t += 33
+        }
+        assertFalse(
+            "After the safety net aborts calibration, state must never return to CALIBRATING",
+            everCalibratedAgain,
         )
     }
 }
