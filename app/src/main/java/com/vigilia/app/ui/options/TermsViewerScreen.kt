@@ -18,6 +18,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.vigilia.app.ui.terms.MarkdownText
 import com.vigilia.app.ui.theme.*
 
 /**
@@ -81,7 +82,7 @@ fun TermsViewerScreen(
                 .padding(16.dp)
                 .verticalScroll(rememberScrollState()),
         ) {
-            Text(
+            MarkdownText(
                 text = body,
                 color = TextPrimary,
                 fontSize = 13.sp,

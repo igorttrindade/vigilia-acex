@@ -11,9 +11,9 @@ package com.vigilia.app.terms
  * re-aceitar no próximo login.
  */
 object TermsConfig {
-    const val TOS_CURRENT_VERSION = "2026-08-31"
+    const val TOS_CURRENT_VERSION = "2026-09-04"
     const val PRIVACY_CURRENT_VERSION = "2026-08-31"
 
-    const val TOS_ASSET = "terms/tos_v2026-08-31.md"
+    const val TOS_ASSET = "terms/tos_v2026-09-04.md"
     const val PRIVACY_ASSET = "terms/privacy_v2026-08-31.md"
 }

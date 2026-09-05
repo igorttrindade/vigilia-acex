@@ -252,7 +252,7 @@ private fun TermsCard(
                     .padding(12.dp)
                     .verticalScroll(scrollState),
             ) {
-                Text(
+                MarkdownText(
                     text = body,
                     color = TextPrimary,
                     fontSize = 13.sp,
