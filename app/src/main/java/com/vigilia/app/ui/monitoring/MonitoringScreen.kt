@@ -35,6 +35,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -49,6 +50,14 @@ import com.vigilia.app.domain.model.FatigueState
 import com.vigilia.app.lighting.LightingMode
 import com.vigilia.app.service.MonitoringService
 import com.vigilia.app.ui.theme.*
+
+// UI-only zoom on the PreviewView. Passengers behind/beside the driver were
+// showing up in the on-screen preview, which reads as "the app is recording me"
+// even though nothing about non-driver faces is persisted. This scale hides them
+// visually. Does NOT touch ImageAnalysis — MediaPipe still sees the full frame,
+// so pickDriverIndex + fatigue detection are unaffected. Tune between 1.3-1.5
+// on device if the driver appears cropped or a passenger still leaks.
+private const val PRIVACY_ZOOM_FACTOR = 1.4f
 
 /**
  * Real-time monitoring screen.
@@ -96,8 +105,8 @@ fun MonitoringScreen(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        // 1. Camera Preview (passive)
+    Box(modifier = Modifier.fillMaxSize().clipToBounds()) {
+        // 1. Camera Preview (passive) — scaled up so passengers don't appear on-screen.
         AndroidView(
             factory = { ctx ->
                 PreviewView(ctx).apply {
@@ -106,7 +115,9 @@ fun MonitoringScreen(
                     previewViewRef = this
                 }
             },
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .scale(PRIVACY_ZOOM_FACTOR),
         )
 
         // 2. Vignette overlay — dark at top for readability, transparent mid, dark at bottom

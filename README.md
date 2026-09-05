@@ -19,6 +19,7 @@ Sessões são persistidas localmente (CSV + JSON) e sincronizadas com Supabase (
 ## Funcionalidades
 
 - **Detecção facial on-device** — nenhum frame de câmera sai do dispositivo. Todo o processamento roda localmente com MediaPipe FaceLandmarker (modelo bundled como asset).
+- **Zoom de privacidade na preview** — a visualização exibida ao motorista é ampliada em 1.4x na UI para que passageiros de trás/lado não apareçam na tela e não se sintam gravados sem consentimento. A análise de fadiga continua vendo o frame completo (o zoom é puramente cosmético), então detecção do motorista, `pickDriverIndex` e scoring seguem inalterados.
 - **Score composto de fadiga** — combina PERCLOS (percentual de olhos fechados numa janela de 30 s), taxa de piscadas (janela de 60 s) e detecção de bocejos, com pesos 65/10/15 (PERCLOS/piscadas/bocejos, soma = 90) e suavização exponencial.
 - **Máquina de estados com histerese** — transições NORMAL ↔ WARNING ↔ FATIGUED exigem que o score sustente o limiar por 3–5 segundos, evitando falsos positivos em oscilações momentâneas.
 - **Calibração personalizada** — nos primeiros 10 s de cada sessão, o app mede a abertura natural dos olhos do motorista e ajusta o limiar de "olho fechado" (padrão PERCLOS-70).
