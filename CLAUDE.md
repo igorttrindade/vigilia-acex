@@ -113,6 +113,21 @@ Constants live in the `companion object` of `FatigueScorer`. **These are the val
 
 Exponential smoothing: `smoothedScore = 0.2 * rawScore + 0.8 * prev` (`SMOOTHING_ALPHA = 0.2`). Convergence takes ~10-15 frames (~400-500 ms) after any raw drop — gentle enough that the score doesn't visibly "collapse" when the yawn contribution releases, while still following genuine multi-second trends.
 
+### Closure contribution — progressive score for the two microsleep detectors
+
+`computeClosureContribution()` feeds a fourth term into `rawScore` alongside PERCLOS/blink/yawn. It's the max of two ramps, one per detector:
+
+| Detector | Threshold to arm | WARNING at | FATIGUED at | Constants |
+|---|---|---|---|---|
+| Tight microsleep | first frame with `rawEyeClosed=true` (post-calibration) or `eyeOpenness < MICROSLEEP_PRECAL_THRESHOLD=0.20` (during CALIBRATING) | 3s continuous | 6s continuous | `MICROSLEEP_WARNING_MS = 3_000L`, `MICROSLEEP_FATIGUED_MS = 6_000L` |
+| Partial closure | first frame with `eyeOpenness < PARTIAL_CLOSURE_THRESHOLD=0.45` (absolute, uncalibrated) | 5s continuous | 8s continuous | `PARTIAL_CLOSURE_WARNING_MS = 5_000L`, `PARTIAL_CLOSURE_FATIGUED_MS = 8_000L` |
+
+Each detector ramps its contribution linearly: 0 → `CLOSURE_CONTRIB_WARNING = 60f` across the pre-WARNING window, then `60 → CLOSURE_CONTRIB_FATIGUED = 85f` across the WARNING→FATIGUED window, capped at 85. When both timers release, the peak contribution is held and decays linearly to 0 over `CLOSURE_DECAY_MS = 3_000L`. Smoothing (α=0.2) turns both directions into a visibly gradual on-screen curve — the score no longer jump-cuts from ~14 to 60 at the alarm instant and then snaps back on recovery.
+
+**Why the partial-closure detector exists (field-test motivation):** the tight microsleep detector needs `rawEyeClosed = true`, i.e. `eyeOpenness < eyeClosedThreshold` (~0.263 after calibration). Field test showed a driver's real eye closure produced MediaPipe blendshapes in the 0.23-0.42 band — mostly above the tight threshold, chaotic detection at the boundary, no sustained closure streak. The partial-closure detector uses an absolute threshold to catch this case. Gated on `!isLookingAway` so glances at mirror/panel don't fire.
+
+**Why the tight-microsleep timer arms on the FIRST raw-closed frame (no debounce):** MediaPipe often drops face detection when eyelids are fully down (blendshapes go null → `createNoFaceMetrics`) within the first 1-2 frames of a closure. Before the debounce completes, `continuousClosureStartMs` was still `-1L`, so the three microsleep safety nets (pre-cal, through-NO_FACE, main-path override) all skipped. The 3s/6s thresholds themselves gate against noise — a single closed frame followed by an open frame resets the timer long before any promotion. `debouncedEyeClosed` still feeds `perclosWindow` so PERCLOS accounting is shielded from single-frame jitter.
+
 ### State machine — hysteresis transitions
 | From | To | Score threshold | Sustained duration |
 |---|---|---|---|
@@ -256,11 +271,23 @@ Supabase columns `ambient_light_lux`, `frame_luminance`, `lighting_mode` exist o
 6. `stopForeground(STOP_FOREGROUND_REMOVE)`, `stopSelf()`.
 
 ### `handleAssessment()` — alert logic
+Severity ordering: `NORMAL=0, WARNING=1, FATIGUED=2` (NO_FACE / CALIBRATING are unranked). Tone (`triggerAlertTone()`) and count (`telemetryWriter.recordAlert()`) are decided independently so audible escalation doesn't double-count in the session summary:
+
 ```
-Transition into WARNING or FATIGUED: alert immediately, set lastAlertTimeMs.
-Sustained FATIGUED: re-alert after ALERT_COOLDOWN_MS = 8_000 ms.
-Return to NORMAL/NO_FACE from WARNING/FATIGUED: stopAlert().
+Escalation into or within danger (severity(new) > severity(prev),
+    new in {WARNING, FATIGUED}):
+        triggerAlertTone()
+        recordAlert()  ONLY IF prev is not in danger — i.e. count on the
+                       first entry from a safe state, not on WARNING→FATIGUED.
+Sustained FATIGUED, cooldown expired (>= ALERT_COOLDOWN_MS = 8_000 ms):
+        triggerAlertTone() + recordAlert()  (a new distinct event.)
+Return to NORMAL/NO_FACE from WARNING/FATIGUED:
+        stopAlert()
+De-escalation FATIGUED→WARNING:
+        no tone, no count — driver's condition improved, don't re-alarm.
 ```
+
+Rationale: a single closure incident that walks NORMAL→WARNING→FATIGUED is one alarm event from the driver's perspective ("I heard the beep and it got worse"), not two. Field report showed session summary reading 5 alerts for 3 audible events — this counting rule brings the summary into agreement with what the driver actually heard, and with the alert dots the chart already de-duplicates via downsample bucketing.
 
 ### Foreground notification
 Ongoing notification (channel `vigilia_monitoring`, IMPORTANCE_LOW) shows current fatigue state + score (or calibration progress). Tapping opens `MainActivity`; a **"Parar"** action button sends `ACTION_STOP` back to the service so the driver can stop monitoring from the notification shade. State labels in the notification are translated to PT-BR (`Normal`, `Atenção`, `Fadigado`, `Rosto não detectado`, `Calibrando`).
@@ -341,7 +368,7 @@ Manifest highlights:
 ## Testing
 
 Unit tests (`app/src/test/`):
-- **FatigueScorerTest** — 21 tests: PERCLOS calc, blink detection, yawn (1.5 s trigger), NORMAL↔WARNING↔FATIGUED hysteresis, reset, calibration stabilization + tolerance + hard cap, consecutive-session score integrity, look-away not inflating PERCLOS, look-away preserving buffer, PERCLOS-alone can't promote to FATIGUED, NO_FACE grace, post-calibration perclosWindow seeding.
+- **FatigueScorerTest** — 54 tests: PERCLOS calc, blink detection, yawn (1.5 s trigger), NORMAL↔WARNING↔FATIGUED hysteresis, reset, calibration stabilization + tolerance + hard cap, consecutive-session score integrity, look-away not inflating PERCLOS, look-away preserving buffer, PERCLOS-alone can't promote to FATIGUED, NO_FACE grace, post-calibration perclosWindow seeding, five microsleep safety nets (pre-calibration with threshold 0.20, through-NO_FACE, buffer preservation on recovery, raw-frame arm surviving MediaPipe dropout after a single closed frame, single-frame noise not surviving into NO_FACE), and the partial-closure detector (WARNING at 5s of eyeOpen<0.45, FATIGUED at 8s).
 - **TelemetryWriterTest** — 3 tests: two consecutive sessions both persist summaries, `startSession` guard-rail finalizes unfinished previous session, single session write/stop.
 - **SessionRepositoryTest** — 2 tests: sessions sorted by startTime desc, folder path resolution.
 - **LightingMonitorTest** (`app/src/test/java/com/vigilia/app/lighting/`) — 11 tests: starts in NORMAL, single dark frame doesn't flip, sustained 2 s → DARK, asymmetric 3 s exit dwell, brief 1 s tunnel doesn't commit, null-lux classification, reset.
