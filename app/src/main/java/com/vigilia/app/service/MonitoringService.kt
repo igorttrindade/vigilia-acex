@@ -215,6 +215,13 @@ class MonitoringService : Service(), LifecycleOwner {
                             lightingMonitor.update(lastAmbientLux, metrics.frameLuminance, metrics.timestampMs)
                             val assessment = scorer.processFrame(metrics)
                             handleAssessment(assessment, metrics)
+                            // Re-check before publishing. scorer.processFrame is 10-30 ms;
+                            // in that window, stopMonitoring() can run on Main and null
+                            // currentAssessment. Without this second check, an in-flight
+                            // frame re-populates currentAssessment with a non-null value
+                            // → ActiveMonitoringBanner stays visible after Stop and the
+                            // MonitoringScreen toggle reads as "sessão ativa".
+                            if (!isProcessRunning) return@startCamera
                             currentAssessment.value = assessment
                         } catch (t: Throwable) {
                             Log.e("MonitoringService", "Frame processing failed — keeping pipeline alive", t)
@@ -270,7 +277,6 @@ class MonitoringService : Service(), LifecycleOwner {
 
         isProcessRunning = false
         stopAlert()  // stop ringtone immediately rather than waiting for onDestroy
-        currentAssessment.value = null
         stopLocationUpdates()
         stopSensorUpdates()
         // WakeLock was held throughout the session; release it now so battery doesn't drain
@@ -286,6 +292,10 @@ class MonitoringService : Service(), LifecycleOwner {
         cameraManager.stopCamera()
         heartbeatJob?.cancel()
         heartbeatJob = null
+        // Null the assessment AFTER stopCamera() so we minimize the window in which an
+        // in-flight frame can re-populate it. The second isProcessRunning check inside the
+        // frame callback is the primary guard; this reorder is defense in depth.
+        currentAssessment.value = null
 
         // Finalize the session summary off the Main thread. TelemetryWriter.writeMutex
         // serializes writeRecord() and stopSession() internally, so any writes still
@@ -346,12 +356,35 @@ class MonitoringService : Service(), LifecycleOwner {
         val previousState = currentAssessment.value?.fatigueState ?: FatigueState.NORMAL
         val newState = assessment.fatigueState
 
+        val dangerStates = setOf(FatigueState.WARNING, FatigueState.FATIGUED)
+        // Rank used to distinguish escalation (worse) from de-escalation (recovering).
+        // NO_FACE and CALIBRATING aren't ranked because they don't participate in the
+        // WARNING/FATIGUED alarm flow — the branches above handle those transitions.
+        fun severity(s: FatigueState): Int = when (s) {
+            FatigueState.NORMAL -> 0
+            FatigueState.WARNING -> 1
+            FatigueState.FATIGUED -> 2
+            else -> -1
+        }
+
         when {
-            // Transition into a danger state — alert immediately (handles first-frame case too).
-            // Update lastAlertTimeMs synchronously so rapid consecutive frames don't queue duplicates.
-            (newState == FatigueState.WARNING || newState == FatigueState.FATIGUED) && newState != previousState -> {
+            // Escalation into or within danger — alert immediately (also handles the
+            // first-frame case NORMAL→WARNING). Gated on severity INCREASE so recovering
+            // from FATIGUED→WARNING does NOT re-trigger the tone (field report: alarm
+            // was firing on the way down, which is jarring: the driver's condition just
+            // improved and the app rewarded them with an alarm).
+            newState in dangerStates && severity(newState) > severity(previousState) -> {
                 lastAlertTimeMs = System.currentTimeMillis()
-                triggerAlert()
+                triggerAlertTone()
+                // Only count as a new alert event when entering danger from a safe state.
+                // A WARNING→FATIGUED escalation is the SAME closure incident getting worse
+                // — the driver perceives it as one alarm event that intensifies, not two
+                // separate alerts. Counting both would inflate history's `totalAlerts` and
+                // conflict with what the driver actually heard (field report: 3 audible
+                // alarms shown as 5 in the summary).
+                if (previousState !in dangerStates) {
+                    telemetryWriter.recordAlert()
+                }
             }
             // Sustained FATIGUED — re-alert periodically after cooldown expires.
             // Cooldown is claimed synchronously to prevent multiple queued launches.
@@ -359,7 +392,10 @@ class MonitoringService : Service(), LifecycleOwner {
                 val now = System.currentTimeMillis()
                 if (now - lastAlertTimeMs >= ALERT_COOLDOWN_MS) {
                     lastAlertTimeMs = now
-                    triggerAlert()
+                    triggerAlertTone()
+                    // Sustained re-alarm after cooldown IS a distinct event — the driver
+                    // did not recover, and the app is re-notifying. Count it.
+                    telemetryWriter.recordAlert()
                 }
             }
             // Returning to safe state — stop any active alert
@@ -410,12 +446,14 @@ class MonitoringService : Service(), LifecycleOwner {
         }
     }
 
-    private fun triggerAlert() {
+    /**
+     * Plays the alarm tone only. Counting is handled at the caller so that
+     * WARNING→FATIGUED escalations play audio but don't double-count as a
+     * separate alert event.
+     */
+    private fun triggerAlertTone() {
         try {
             alertJob?.cancel()
-            // Count the alert per trigger, not per telemetry row that catches the tone
-            // playing — see TelemetryWriter.recordAlert() for rationale.
-            telemetryWriter.recordAlert()
             alertJob = serviceScope.launch {
                 toneGenerator?.startTone(ToneGenerator.TONE_CDMA_HIGH_PBX_SLS, 200)
                 delay(350L)
