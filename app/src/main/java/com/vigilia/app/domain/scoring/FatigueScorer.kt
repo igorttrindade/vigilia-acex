@@ -51,6 +51,10 @@ class FatigueScorer(
         // — noticeably gentler drop without hiding real changes (transition gates still
         // require multi-second sustain).
         const val SMOOTHING_ALPHA = 0.2f
+        // Smaller alpha used when rawScore < smoothedScore (score descending). 0.08 extends
+        // fall convergence from ~15 frames to ~35-40 frames (~1.2s), keeping the score
+        // elevated after a closure event without affecting rise speed or promotion behavior.
+        const val SMOOTHING_ALPHA_DESCENT = 0.08f
 
         // Generic thresholds — replaced by calibrated values when calibration runs
         const val EYE_CLOSED_THRESHOLD_DEFAULT = 0.3f
@@ -250,7 +254,7 @@ class FatigueScorer(
         // (YAWN_HOLD_MS + YAWN_DECAY_MS) so the score falls at the same rate it climbed.
         const val CLOSURE_CONTRIB_WARNING = 60f
         const val CLOSURE_CONTRIB_FATIGUED = 85f
-        const val CLOSURE_DECAY_MS = 3_000L
+        const val CLOSURE_DECAY_MS = 8_000L
 
         // Pre-calibration microsleep safety net. If the driver already has their eyes
         // closed at Start (or falls asleep during the ~10 s calibration window), the
@@ -849,11 +853,16 @@ class FatigueScorer(
         val closureContribution = computeClosureContribution(currentTime)
 
         val rawScore = perclosContribution + blinkContribution + yawnContribution + closureContribution
-        smoothedScore = (SMOOTHING_ALPHA * rawScore) + (1f - SMOOTHING_ALPHA) * smoothedScore
+        val alpha = if (rawScore >= smoothedScore) SMOOTHING_ALPHA else SMOOTHING_ALPHA_DESCENT
+        smoothedScore = alpha * rawScore + (1f - alpha) * smoothedScore
 
         Log.d("FatigueScorer", "score=$smoothedScore state=$currentState perclos=$perclos blinkRate=$blinkRate yawning=$isCurrentlyYawning lookAway=$isLookingAway yaw=${metrics.headYawDegrees} pitch=${metrics.headPitchDegrees}")
 
         // 5. State Machine with Hysteresis
+        // Capture state before FSM runs so the override blocks below can cap promotions
+        // against the PUBLISHED state (the one handleAssessment will see as previousState),
+        // not the intermediate state that updateState() may have just written.
+        val stateBeforeUpdates = currentState
         updateState(smoothedScore, currentTime)
 
         // 6. Microsleep override — sustained continuous closure promotes state directly,
@@ -870,14 +879,17 @@ class FatigueScorer(
                 else -> null
             }
             if (microsleepState != null) {
-                if (stateSeverity(microsleepState) > stateSeverity(currentState)) {
-                    currentState = microsleepState
+                // Cap to one severity step above stateBeforeUpdates. Without this, the FSM
+                // can complete NORMAL→WARNING and the microsleep timer can fire FATIGUED in
+                // the same frame — handleAssessment would see NORMAL→FATIGUED and play only
+                // one alarm tone, skipping the WARNING escalation the driver expects.
+                val effectiveMicrosleep = if (stateSeverity(microsleepState) > stateSeverity(stateBeforeUpdates) + 1)
+                    FatigueState.WARNING else microsleepState
+                if (stateSeverity(effectiveMicrosleep) > stateSeverity(currentState)) {
+                    currentState = effectiveMicrosleep
                 }
                 targetState = null
                 transitionAccumulatedMs = 0L
-                // Score itself was already lifted by closureContribution above; no
-                // maxOf(smoothedScore, 60/85) needed here. The FSM update is what
-                // categorically promotes to WARNING/FATIGUED so alerts fire on time.
             }
         }
 
@@ -894,12 +906,14 @@ class FatigueScorer(
                 else -> null
             }
             if (partialState != null) {
-                if (stateSeverity(partialState) > stateSeverity(currentState)) {
-                    currentState = partialState
+                // Same one-step cap against stateBeforeUpdates.
+                val effectivePartial = if (stateSeverity(partialState) > stateSeverity(stateBeforeUpdates) + 1)
+                    FatigueState.WARNING else partialState
+                if (stateSeverity(effectivePartial) > stateSeverity(currentState)) {
+                    currentState = effectivePartial
                 }
                 targetState = null
                 transitionAccumulatedMs = 0L
-                // Score itself is lifted by closureContribution in the raw sum above.
             }
         }
 
