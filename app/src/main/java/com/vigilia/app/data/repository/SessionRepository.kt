@@ -6,6 +6,7 @@ import com.vigilia.app.domain.model.FatigueState
 import com.vigilia.app.domain.model.SessionSummary
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
@@ -198,6 +199,10 @@ class SessionRepository private constructor(
             } catch (_: Exception) {
                 FatigueState.NORMAL
             }
+            val alertTimestamps = try {
+                val arr: JSONArray? = obj.optJSONArray("alertTimestamps")
+                if (arr != null) (0 until arr.length()).map { arr.getLong(it) } else emptyList()
+            } catch (_: Exception) { emptyList() }
             SessionSummary(
                 sessionId = obj.getString("sessionId"),
                 startTime = obj.getLong("startTime"),
@@ -207,6 +212,7 @@ class SessionRepository private constructor(
                 dominantState = dominantState,
                 averageScore = obj.getDouble("averageScore").toFloat(),
                 peakScore = obj.getDouble("peakScore").toFloat(),
+                alertTimestamps = alertTimestamps,
             )
         } catch (_: Exception) {
             null

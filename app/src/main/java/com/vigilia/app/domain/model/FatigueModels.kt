@@ -53,7 +53,11 @@ data class SessionSummary(
     val totalAlerts: Int,
     val dominantState: FatigueState,
     val averageScore: Float,
-    val peakScore: Float
+    val peakScore: Float,
+    // Exact epoch-ms timestamps of each alert tone trigger, written to session_summary.json.
+    // Empty for sessions recorded before this field was added — the timeline falls back to
+    // showing only the total count with no dot positions.
+    val alertTimestamps: List<Long> = emptyList(),
 )
 
 data class TelemetryRecord(

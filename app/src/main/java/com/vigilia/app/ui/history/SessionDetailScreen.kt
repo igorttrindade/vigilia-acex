@@ -163,7 +163,7 @@ private fun DetailBody(
         Spacer(modifier = Modifier.height(20.dp))
         SectionTitle(text = "Linha do tempo de alertas")
         Spacer(modifier = Modifier.height(10.dp))
-        AlertsTimeline(summary = summary, timeline = timeline)
+        AlertsTimeline(summary = summary)
         Spacer(modifier = Modifier.height(32.dp))
     }
 }
@@ -475,16 +475,15 @@ private fun LegendChip(color: Color, label: String) {
 @Composable
 private fun AlertsTimeline(
     summary: SessionSummary,
-    timeline: List<SessionTelemetryPoint>,
 ) {
-    val alertPoints = timeline.filter { it.alertActive }
+    val alertTimestamps = summary.alertTimestamps
     Surface(
         color = SurfaceDark,
         shape = RoundedCornerShape(16.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            if (alertPoints.isEmpty()) {
+            if (alertTimestamps.isEmpty()) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
                         modifier = Modifier
@@ -522,8 +521,8 @@ private fun AlertsTimeline(
                         end = Offset(w, h / 2f),
                         strokeWidth = 3f,
                     )
-                    alertPoints.forEach { p ->
-                        val x = ((p.timestamp - startMs).coerceAtLeast(0L).toFloat() / range) * w
+                    alertTimestamps.forEach { ts ->
+                        val x = ((ts - startMs).coerceAtLeast(0L).toFloat() / range) * w
                         drawCircle(
                             color = AlertRed.copy(alpha = 0.3f),
                             radius = 7f,

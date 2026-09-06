@@ -9,10 +9,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileWriter
 import java.util.UUID
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -49,6 +51,8 @@ class TelemetryWriter private constructor(
     // AtomicInteger so recordAlert() can be called from any thread (frame callback lives
     // on the analysis executor, not on Main). No mutex needed for a monotonic counter.
     private val totalAlerts = AtomicInteger(0)
+    // CopyOnWriteArrayList for the same reason — recordAlert() is called off-main.
+    private val alertTimestampsList = CopyOnWriteArrayList<Long>()
     private var scoreSum: Double = 0.0
     private var recordCount: Long = 0
     private var peakScore: Float = 0f
@@ -94,6 +98,7 @@ class TelemetryWriter private constructor(
         // Reset metrics
         startTimeMillis = System.currentTimeMillis()
         totalAlerts.set(0)
+        alertTimestampsList.clear()
         scoreSum = 0.0
         recordCount = 0
         peakScore = 0f
@@ -179,7 +184,10 @@ class TelemetryWriter private constructor(
      * a 2s telemetry row was written — a heavy sampling bias against short alerts.
      */
     fun recordAlert() {
-        if (currentSessionId != null) totalAlerts.incrementAndGet()
+        if (currentSessionId != null) {
+            totalAlerts.incrementAndGet()
+            alertTimestampsList.add(System.currentTimeMillis())
+        }
     }
 
     /**
@@ -207,7 +215,8 @@ class TelemetryWriter private constructor(
             totalAlerts = totalAlerts.get(),
             dominantState = dominantState,
             averageScore = avgScore,
-            peakScore = peakScore
+            peakScore = peakScore,
+            alertTimestamps = alertTimestampsList.toList(),
         )
 
         // Write session_summary.json using manual JSON building
@@ -249,6 +258,7 @@ class TelemetryWriter private constructor(
             put("dominantState", s.dominantState.name)
             put("averageScore", s.averageScore.toDouble())
             put("peakScore", s.peakScore.toDouble())
+            put("alertTimestamps", JSONArray(s.alertTimestamps))
         }.toString(2)
     }
 }
