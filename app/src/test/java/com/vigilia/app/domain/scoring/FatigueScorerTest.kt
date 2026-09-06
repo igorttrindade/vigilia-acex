@@ -1214,22 +1214,22 @@ class FatigueScorerTest {
     }
 
     @Test
-    fun `partial closure detector fires WARNING at 5s of sustained half-closed eyes`() {
+    fun `partial closure detector fires WARNING at 3s of sustained half-closed eyes`() {
         // Field test: driver kept eyes closed for 60s but MediaPipe blendshape reported
         // openness in the 0.23-0.42 range throughout (never below the calibrated 0.263
         // threshold consistently). The tight microsleep detector never armed because the
         // "raw closed" streak kept breaking. The partial closure detector picks that up.
-        // Feed 51 frames with openness=0.35 (below PARTIAL_CLOSURE_THRESHOLD=0.45 but
-        // above the default eyeClosedThreshold=0.30) at 100ms spacing = 5s total.
+        // Feed 31 frames with openness=0.35 (below PARTIAL_CLOSURE_THRESHOLD=0.45 but
+        // above the default eyeClosedThreshold=0.30) at 100ms spacing = 3s total.
         var t = 0L
         var last = scorer.processFrame(FatigueMetrics(0.35f, 0.35f, 0.1f, true, t))
         t += 100
-        repeat(50) {
+        repeat(30) {
             last = scorer.processFrame(FatigueMetrics(0.35f, 0.35f, 0.1f, true, t))
             t += 100
         }
         assertEquals(
-            "Expected WARNING after 5s of sustained partial closure, got ${last.fatigueState}",
+            "Expected WARNING after 3s of sustained partial closure, got ${last.fatigueState}",
             FatigueState.WARNING,
             last.fatigueState,
         )

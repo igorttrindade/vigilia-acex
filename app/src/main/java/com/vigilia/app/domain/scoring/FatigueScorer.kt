@@ -240,7 +240,7 @@ class FatigueScorer(
         // doesn't fire (though sustained head-down is itself a fatigue signal, we let
         // the existing look-away FSM own that concern).
         const val PARTIAL_CLOSURE_THRESHOLD = 0.45f
-        const val PARTIAL_CLOSURE_WARNING_MS = 5_000L
+        const val PARTIAL_CLOSURE_WARNING_MS = 3_000L
         const val PARTIAL_CLOSURE_FATIGUED_MS = 8_000L
 
         // Progressive-contribution mapping for both closure detectors (tight microsleep
