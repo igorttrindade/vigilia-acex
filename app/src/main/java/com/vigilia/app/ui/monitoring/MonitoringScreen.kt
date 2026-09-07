@@ -57,7 +57,7 @@ import com.vigilia.app.ui.theme.*
 // visually. Does NOT touch ImageAnalysis — MediaPipe still sees the full frame,
 // so pickDriverIndex + fatigue detection are unaffected. Tune between 1.3-1.5
 // on device if the driver appears cropped or a passenger still leaks.
-private const val PRIVACY_ZOOM_FACTOR = 1.4f
+private const val PRIVACY_ZOOM_FACTOR = 2.016f
 
 /**
  * Real-time monitoring screen.

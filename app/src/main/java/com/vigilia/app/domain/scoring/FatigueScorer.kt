@@ -195,7 +195,12 @@ class FatigueScorer(
         // dashboard, side windows), MediaPipe's eye blendshapes inflate because the eyelids
         // appear more closed in oblique perspective. Pausing PERCLOS/blink/yawn accumulation
         // during these frames prevents falsely scoring natural in-vehicle looking as fatigue.
-        const val LOOK_AWAY_YAW_DEGREES = 25f
+        // Widened from 25° → 45° to support diagonal phone mounts (typical range: 15–35° off-axis).
+        // With the neutral-position calibration (neutralYawDegrees set from calibration samples),
+        // the effective tolerance from the driver's actual forward direction is ±45° — covering
+        // both face-on-calibration-then-diagonal-use and the vice versa scenario. Real mirror
+        // checks (≥50° head turn from forward) are still detected.
+        const val LOOK_AWAY_YAW_DEGREES = 45f
         const val LOOK_AWAY_PITCH_DEGREES_UP = 20f     // head tilted upward
         const val LOOK_AWAY_PITCH_DEGREES_DOWN = 25f   // head tilted downward (slightly more permissive — driver glances at dashboard)
 
@@ -207,6 +212,11 @@ class FatigueScorer(
         // normal accumulation. Distraction with eyes open is protected by EAR — PERCLOS won't
         // inflate because openness stays above threshold.
         const val LOOK_AWAY_MAX_FREEZE_MS = 2_000L
+        // Debounce: require this many ms of sustained out-of-range head angle before entering
+        // look-away state. Road vibrations and potholes cause brief head jolts (typically
+        // < 100 ms) that would otherwise reset closure timers and collapse the score mid-episode.
+        // 150 ms absorbs bumps while still reacting to deliberate mirror/dashboard glances (≥ 300 ms).
+        const val LOOK_AWAY_DEBOUNCE_MS = 150L
 
         // Minimum buffer size before PERCLOS is trusted. After a time-limit exit we clear
         // perclosWindow so pre-look-away data doesn't contaminate; without this guard, the
@@ -314,8 +324,14 @@ class FatigueScorer(
     // saturates below 1.0 even with eyes fully open. Timestamps are kept so finishCalibration()
     // can seed the perclosWindow with these frames, avoiding a zero-history transient right
     // when state transitions to NORMAL.
-    private data class CalibrationSample(val ts: Long, val minAvg: Float, val blendAvg: Float)
+    private data class CalibrationSample(val ts: Long, val minAvg: Float, val blendAvg: Float, val yaw: Float, val pitch: Float)
     private val calibrationSamples = mutableListOf<CalibrationSample>()
+    // Neutral head position derived from calibration samples (median yaw/pitch while the
+    // driver is looking at the phone in the mounted position). Look-away detection uses
+    // offsets from this baseline so diagonal mounts don't permanently trigger isLookingAway.
+    // Stays 0f when calibration is disabled — preserves absolute-reference behavior.
+    private var neutralYawDegrees: Float = 0f
+    private var neutralPitchDegrees: Float = 0f
     private var eyeClosedThreshold = EYE_CLOSED_THRESHOLD_DEFAULT
     private var eyeOpenThreshold = EYE_OPEN_THRESHOLD_DEFAULT
 
@@ -333,6 +349,10 @@ class FatigueScorer(
     // updated) for every frame during look-away so smoothedScore / state / perclos stay
     // truly frozen — no drift from stale rawScore computed over a decimated buffer.
     private var lookAwayFrozenAssessment: FatigueAssessment? = null
+    // Timestamp of the first frame where the raw look-away condition became true.
+    // Look-away is confirmed (timers reset, buffers frozen) only after LOOK_AWAY_DEBOUNCE_MS
+    // of continuous out-of-range angle. Resets to -1L whenever the condition is false.
+    private var lookAwayCandidateStartMs: Long = -1L
 
     // Timestamp of the first debounced-closed frame in the current continuous-closure
     // streak. -1L when eyes are open or the streak was just broken. Feeds the microsleep
@@ -569,7 +589,8 @@ class FatigueScorer(
             }
 
             calibrationSamples.add(
-                CalibrationSample(currentTime, eyeOpenness, metrics.avgBlendshapeOpen)
+                CalibrationSample(currentTime, eyeOpenness, metrics.avgBlendshapeOpen,
+                    metrics.headYawDegrees, metrics.headPitchDegrees)
             )
 
             val elapsed = currentTime - calibrationStartMs
@@ -602,9 +623,19 @@ class FatigueScorer(
         // duration so the 30s/60s windows keep representing forward-facing driving time —
         // not wall-clock time. This eliminates the spike observed when the buffer decimates
         // during long look-aways and produces artificial PERCLOS on the first return frame.
-        val isLookingAway = kotlin.math.abs(metrics.headYawDegrees) > LOOK_AWAY_YAW_DEGREES ||
-                metrics.headPitchDegrees > LOOK_AWAY_PITCH_DEGREES_UP ||
-                metrics.headPitchDegrees < -LOOK_AWAY_PITCH_DEGREES_DOWN
+        val relativeYaw = metrics.headYawDegrees - neutralYawDegrees
+        val relativePitch = metrics.headPitchDegrees - neutralPitchDegrees
+        val isLookingAwayRaw = kotlin.math.abs(relativeYaw) > LOOK_AWAY_YAW_DEGREES ||
+                relativePitch > LOOK_AWAY_PITCH_DEGREES_UP ||
+                relativePitch < -LOOK_AWAY_PITCH_DEGREES_DOWN
+        if (isLookingAwayRaw) {
+            if (lookAwayCandidateStartMs < 0L) lookAwayCandidateStartMs = currentTime
+        } else {
+            lookAwayCandidateStartMs = -1L
+        }
+        val isLookingAway = isLookingAwayRaw &&
+                lookAwayCandidateStartMs >= 0L &&
+                (currentTime - lookAwayCandidateStartMs) >= LOOK_AWAY_DEBOUNCE_MS
 
         // Look-away ENTRY: snapshot the current assessment; subsequent frames return it verbatim.
         if (isLookingAway && lookAwayStartTime < 0L) {
@@ -951,6 +982,8 @@ class FatigueScorer(
         firstCalibrationFrameMs = -1L
         calibrationBelowCount = 0
         calibrationSamples.clear()
+        neutralYawDegrees = 0f
+        neutralPitchDegrees = 0f
         eyeClosedThreshold = EYE_CLOSED_THRESHOLD_DEFAULT
         eyeOpenThreshold = EYE_OPEN_THRESHOLD_DEFAULT
         blinkClosedThreshold = BLINK_CLOSED_THRESHOLD_DEFAULT
@@ -960,6 +993,7 @@ class FatigueScorer(
         monitoringStartMs = -1L
         lookAwayStartTime = -1L
         lookAwayFrozenAssessment = null
+        lookAwayCandidateStartMs = -1L
         continuousClosureStartMs = -1L
         partialClosureStartMs = -1L
         closurePeakContribution = 0f
@@ -1058,12 +1092,21 @@ class FatigueScorer(
         // defensive in case the stabilization gate ever admits a closed frame in the future.
         perclosConsecutiveClosedCount = 0
         perclosLastClassifiedClosed = false
+        // Neutral head position — median yaw/pitch from calibration frames. Lets the
+        // look-away detector work relative to whatever angle the phone is mounted at
+        // (e.g. diagonal dashboard mount) instead of requiring a face-on 0° reference.
+        val yawSorted = calibrationSamples.map { it.yaw }.sorted()
+        val pitchSorted = calibrationSamples.map { it.pitch }.sorted()
+        val midIdx = calibrationSamples.size / 2
+        neutralYawDegrees = yawSorted[midIdx]
+        neutralPitchDegrees = pitchSorted[midIdx]
+
         // Anchor blink warmup at the start of calibration so BLINK_MIN_OBSERVATION_MS (30s)
         // ticks in parallel with data collection — otherwise blink deviation only starts
         // penalizing 30 s after calibration ends, which is unnecessarily conservative.
         monitoringStartMs = calibrationSamples.first().ts
 
-        Log.d("FatigueScorer", "Calibration done: baseline=$baseline closed=$eyeClosedThreshold open=$eyeOpenThreshold blinkClosed=$blinkClosedThreshold blinkOpen=$blinkOpenThreshold samples=${calibrationSamples.size} seededPerclos=${perclosWindow.size}")
+        Log.d("FatigueScorer", "Calibration done: baseline=$baseline closed=$eyeClosedThreshold open=$eyeOpenThreshold blinkClosed=$blinkClosedThreshold blinkOpen=$blinkOpenThreshold samples=${calibrationSamples.size} seededPerclos=${perclosWindow.size} neutralYaw=$neutralYawDegrees neutralPitch=$neutralPitchDegrees")
     }
 
     private fun calculateBlinkDeviationScore(blinkRate: Float): Float {
