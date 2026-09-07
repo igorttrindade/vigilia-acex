@@ -213,8 +213,14 @@ private fun TermsCard(
     val scrollState = rememberScrollState()
     // scrolledToEnd = true quando o usuário rolou até o fim OU o conteúdo é
     // curto o suficiente pra caber inteiro (maxValue == 0).
+    // Tolerance de 150px: o scroll physics do Android para ligeiramente antes
+    // de maxValue em textos longos (política de privacidade ~177 linhas),
+    // deixando o botão eternamente desabilitado mesmo após o usuário rolar até
+    // onde visualmente parece ser o fim.
     val scrolledToEnd by remember {
-        derivedStateOf { scrollState.value >= scrollState.maxValue }
+        derivedStateOf {
+            scrollState.maxValue == 0 || scrollState.value >= scrollState.maxValue - 150
+        }
     }
 
     Surface(
