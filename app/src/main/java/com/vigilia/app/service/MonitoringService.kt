@@ -62,6 +62,14 @@ class MonitoringService : Service(), LifecycleOwner {
         private const val ALERT_COOLDOWN_MS = 8_000L
 
         val currentAssessment = MutableStateFlow<FatigueAssessment?>(null)
+
+        /**
+         * Session most recently finalized on disk (session_summary.json fully written).
+         * Reset to null on startMonitoring(), emitted from the writerScope.finally after
+         * stopSession() returns. Consumed by MonitoringViewModel to trigger the end-of-session
+         * sync overlay and know which sessionId just ended (FatigueAssessment has no id).
+         */
+        val lastFinalizedSessionId = MutableStateFlow<String?>(null)
     }
 
     private lateinit var lifecycleRegistry: LifecycleRegistry
@@ -187,6 +195,9 @@ class MonitoringService : Service(), LifecycleOwner {
             ambientLuxProvider = { lastAmbientLux },
         )
         lightingMonitor.reset()
+        // Clear stale value so the ViewModel's observer doesn't grab the id of the
+        // previous session before this one has a chance to finish.
+        lastFinalizedSessionId.value = null
         startForeground(NOTIFICATION_ID, createNotification("Iniciando monitoramento..."))
         startLocationUpdates()
         startSensorUpdates()
@@ -307,12 +318,16 @@ class MonitoringService : Service(), LifecycleOwner {
         // guard. If a new session starts before this finalization completes, the guard-rail
         // in TelemetryWriter.startSession() finalizes the orphan before creating the new one.
         writerScope.launch {
+            val finishing = sessionId
             try {
                 telemetryWriter.stopSession()
             } catch (e: Exception) {
                 Log.e("MonitoringService", "Stop session failed", e)
             } finally {
                 sessionId = null
+                // Emit even on failure so the ViewModel doesn't hang; syncSingleSession
+                // will fail cleanly on a missing/corrupt summary and surface the reason.
+                finishing?.let { lastFinalizedSessionId.value = it }
             }
         }
 

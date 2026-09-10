@@ -58,6 +58,10 @@ data class SessionSummary(
     // Empty for sessions recorded before this field was added — the timeline falls back to
     // showing only the total count with no dot positions.
     val alertTimestamps: List<Long> = emptyList(),
+    // Driver rating captured after session end. 1..5 stars; null = not rated (or skipped).
+    val driverRating: Int? = null,
+    // Free-text comment, max 255 chars. Null = no comment.
+    val driverComment: String? = null,
 )
 
 data class TelemetryRecord(

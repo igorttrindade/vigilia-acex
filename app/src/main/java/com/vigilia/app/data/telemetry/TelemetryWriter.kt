@@ -259,6 +259,31 @@ class TelemetryWriter private constructor(
             put("averageScore", s.averageScore.toDouble())
             put("peakScore", s.peakScore.toDouble())
             put("alertTimestamps", JSONArray(s.alertTimestamps))
+            put("driverRating", s.driverRating ?: JSONObject.NULL)
+            put("driverComment", s.driverComment ?: JSONObject.NULL)
         }.toString(2)
+    }
+
+    /**
+     * Overwrites session_summary.json with the driver's rating + comment.
+     * Called by the UI when the driver submits the post-session evaluation.
+     * Idempotent — safe to call multiple times.
+     */
+    suspend fun updateSessionRating(
+        sessionId: String,
+        rating: Int,
+        comment: String?,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        writeMutex.withLock {
+            runCatching {
+                val folder = File(baseDir, sessionId)
+                val file = File(folder, "session_summary.json")
+                if (!file.exists()) error("session_summary.json não encontrado")
+                val json = JSONObject(file.readText())
+                json.put("driverRating", rating)
+                json.put("driverComment", comment ?: JSONObject.NULL)
+                file.writeText(json.toString(2))
+            }
+        }
     }
 }

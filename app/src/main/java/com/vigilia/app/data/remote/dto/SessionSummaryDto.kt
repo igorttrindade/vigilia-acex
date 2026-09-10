@@ -15,4 +15,7 @@ data class SessionSummaryDto(
     @SerialName("dominant_state") val dominantState: String,
     @SerialName("average_score") val averageScore: Float,
     @SerialName("peak_score") val peakScore: Float,
+    // Nullable so older sessions synced before rating existed still work.
+    @SerialName("driver_rating") val driverRating: Int? = null,
+    @SerialName("driver_comment") val driverComment: String? = null,
 )

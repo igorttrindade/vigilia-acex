@@ -203,6 +203,8 @@ class SessionRepository private constructor(
                 val arr: JSONArray? = obj.optJSONArray("alertTimestamps")
                 if (arr != null) (0 until arr.length()).map { arr.getLong(it) } else emptyList()
             } catch (_: Exception) { emptyList() }
+            val driverRating = obj.optInt("driverRating", -1).takeIf { it in 1..5 }
+            val driverComment = obj.optString("driverComment", "").takeIf { it.isNotBlank() }
             SessionSummary(
                 sessionId = obj.getString("sessionId"),
                 startTime = obj.getLong("startTime"),
@@ -213,6 +215,8 @@ class SessionRepository private constructor(
                 averageScore = obj.getDouble("averageScore").toFloat(),
                 peakScore = obj.getDouble("peakScore").toFloat(),
                 alertTimestamps = alertTimestamps,
+                driverRating = driverRating,
+                driverComment = driverComment,
             )
         } catch (_: Exception) {
             null

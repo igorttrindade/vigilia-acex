@@ -37,8 +37,31 @@ class SyncRepository(private val context: Context) {
             dominantState = summary.dominantState.name,
             averageScore = summary.averageScore,
             peakScore = summary.peakScore,
+            driverRating = summary.driverRating,
+            driverComment = summary.driverComment,
         )
         SupabaseClient.client.from("sessions").upsert(dto)
+    }
+
+    /**
+     * Best-effort update of driver rating on an already-synced session.
+     * PATCHes just the two rating columns via Postgrest .update() (doesn't touch telemetry).
+     * Called from the end-of-session flow when the session already has `.synced` marker —
+     * a plain re-sync would be skipped, so we go direct.
+     */
+    suspend fun uploadRating(sessionId: String, rating: Int, comment: String?): Result<Unit> = runCatching {
+        if (!isOnline()) error("Sem conexão")
+        val userId = authRepository.refreshAndGetUserId()
+            ?: error("Not logged in — session expired or user signed out")
+        SupabaseClient.client.from("sessions").update({
+            set("driver_rating", rating)
+            set("driver_comment", comment)
+        }) {
+            filter {
+                eq("id", sessionId)
+                eq("user_id", userId)
+            }
+        }
     }
 
     /**
@@ -70,8 +93,32 @@ class SyncRepository(private val context: Context) {
     }
 
     /**
+     * Whether a session folder has been marked as successfully uploaded.
+     */
+    fun isSessionSynced(sessionId: String): Boolean {
+        val folder = File(File(context.filesDir, "sessions"), sessionId)
+        return File(folder, ".synced").exists()
+    }
+
+    /**
+     * Uploads a single session (summary + telemetry) and writes the `.synced` marker on success.
+     * Idempotent: no-op if already synced. Surfaces the underlying exception message so the UI
+     * can show it to the driver ("Sem conexão", "Não autenticado", RLS errors, etc.).
+     */
+    suspend fun syncSingleSession(sessionId: String): Result<Unit> = runCatching {
+        if (!isOnline()) error("Sem conexão")
+        val folder = File(File(context.filesDir, "sessions"), sessionId)
+        if (!folder.exists()) error("Sessão não encontrada localmente")
+        if (File(folder, ".synced").exists()) return@runCatching
+        val summary = parseSummaryJson(folder) ?: error("Resumo da sessão corrompido")
+        syncSession(summary).getOrThrow()
+        syncTelemetry(summary.sessionId).getOrThrow()
+        File(folder, ".synced").createNewFile()
+        Log.i("SyncRepository", "Synced session $sessionId")
+    }
+
+    /**
      * Scans local sessions and syncs any that have not yet been uploaded.
-     * A `.synced` marker file is created in the session folder after a successful upload.
      * Failures are logged per-session and do not interrupt other sessions.
      */
     suspend fun syncPendingSessions() {
@@ -81,14 +128,7 @@ class SyncRepository(private val context: Context) {
 
         sessionsDir.listFiles()?.filter { it.isDirectory }?.forEach { folder ->
             if (File(folder, ".synced").exists()) return@forEach
-
-            try {
-                val summary = parseSummaryJson(folder) ?: return@forEach
-                syncSession(summary).getOrThrow()
-                syncTelemetry(summary.sessionId).getOrThrow()
-                File(folder, ".synced").createNewFile()
-                Log.i("SyncRepository", "Synced session ${summary.sessionId}")
-            } catch (e: Exception) {
+            syncSingleSession(folder.name).onFailure { e ->
                 Log.e("SyncRepository", "Failed to sync session ${folder.name}: ${e.message}", e)
             }
         }
@@ -158,6 +198,8 @@ class SyncRepository(private val context: Context) {
             } catch (_: Exception) {
                 FatigueState.NORMAL
             }
+            val driverRating = obj.optInt("driverRating", -1).takeIf { it in 1..5 }
+            val driverComment = obj.optString("driverComment", "").takeIf { it.isNotBlank() }
             SessionSummary(
                 sessionId = obj.getString("sessionId"),
                 startTime = obj.getLong("startTime"),
@@ -167,6 +209,8 @@ class SyncRepository(private val context: Context) {
                 dominantState = dominantState,
                 averageScore = obj.getDouble("averageScore").toFloat(),
                 peakScore = obj.getDouble("peakScore").toFloat(),
+                driverRating = driverRating,
+                driverComment = driverComment,
             )
         } catch (_: Exception) { null }
     }

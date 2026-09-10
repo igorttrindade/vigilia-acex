@@ -15,7 +15,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.lifecycle.Lifecycle
@@ -61,6 +64,8 @@ fun HistoryScreen(
     HistoryContent(
         uiState = uiState,
         onSessionClick = onSessionClick,
+        onSyncClick = viewModel::syncSession,
+        onExportClick = viewModel::exportSession,
         onBack = onBack,
     )
 }
@@ -69,6 +74,8 @@ fun HistoryScreen(
 fun HistoryContent(
     uiState: HistoryUiState,
     onSessionClick: (String) -> Unit,
+    onSyncClick: (String) -> Unit = {},
+    onExportClick: (String) -> Unit = {},
     onBack: () -> Unit,
 ) {
     Column(
@@ -182,7 +189,10 @@ fun HistoryContent(
                     items(uiState.sessions) { session ->
                         SessionCard(
                             session = session,
+                            syncStatus = uiState.syncStatuses[session.sessionId] ?: SessionSyncStatus.Pending,
                             onClick = { onSessionClick(session.sessionId) },
+                            onSyncClick = { onSyncClick(session.sessionId) },
+                            onExportClick = { onExportClick(session.sessionId) },
                         )
                     }
                 }
@@ -240,13 +250,27 @@ private fun StatItem(label: String, value: String, valueColor: Color = TextPrima
 @Composable
 fun SessionCard(
     session: SessionSummary,
+    syncStatus: SessionSyncStatus = SessionSyncStatus.Synced,
     onClick: () -> Unit,
+    onSyncClick: () -> Unit = {},
+    onExportClick: () -> Unit = {},
 ) {
     val stateColor = when (session.dominantState) {
         FatigueState.NORMAL -> NormalGreen
         FatigueState.WARNING -> AccentAmber
         FatigueState.FATIGUED -> AlertRed
         FatigueState.NO_FACE, FatigueState.CALIBRATING -> Color(0xFF6B7280)
+    }
+
+    var showExportDialog by remember { mutableStateOf(false) }
+    if (showExportDialog) {
+        ExportExplanationDialog(
+            onConfirm = {
+                showExportDialog = false
+                onExportClick()
+            },
+            onDismiss = { showExportDialog = false },
+        )
     }
 
     Surface(
@@ -324,16 +348,186 @@ fun SessionCard(
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     StateBadge(state = session.dominantState)
-                    Spacer(modifier = Modifier.width(12.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    SyncStatusChip(status = syncStatus)
+                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = "${session.totalAlerts} alertas",
                         color = if (session.totalAlerts > 0) AlertRed.copy(alpha = 0.85f) else TextSecondary,
                         fontSize = 12.sp,
                     )
                 }
+
+                SyncActionsRow(
+                    status = syncStatus,
+                    onSyncClick = onSyncClick,
+                    onExportClick = { showExportDialog = true },
+                )
             }
         }
     }
+}
+
+@Composable
+private fun SyncStatusChip(status: SessionSyncStatus) {
+    val (color, label, icon) = when (status) {
+        SessionSyncStatus.Synced -> Triple(NormalGreen, "Sincronizado", Icons.Default.CheckCircle)
+        SessionSyncStatus.Pending -> Triple(AccentAmber, "Pendente", Icons.Default.CloudUpload)
+        SessionSyncStatus.Syncing -> Triple(AccentAmber, "Enviando…", Icons.Default.CloudUpload)
+        is SessionSyncStatus.Failed -> Triple(AlertRed, "Falhou", Icons.Default.Warning)
+    }
+    Surface(
+        color = color.copy(alpha = 0.18f),
+        shape = MaterialTheme.shapes.extraSmall,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = color,
+                modifier = Modifier.size(11.dp),
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = label,
+                color = color,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.4.sp,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SyncActionsRow(
+    status: SessionSyncStatus,
+    onSyncClick: () -> Unit,
+    onExportClick: () -> Unit,
+) {
+    when (status) {
+        SessionSyncStatus.Synced -> Unit
+        SessionSyncStatus.Pending -> {
+            Spacer(modifier = Modifier.height(12.dp))
+            Button(
+                onClick = onSyncClick,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = AccentAmber,
+                    contentColor = Color.Black,
+                ),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CloudUpload,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Sincronizar agora", fontWeight = FontWeight.SemiBold)
+            }
+        }
+        SessionSyncStatus.Syncing -> {
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center,
+            ) {
+                CircularProgressIndicator(
+                    color = AccentAmber,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = "Sincronizando…",
+                    color = TextSecondary,
+                    fontSize = 13.sp,
+                )
+            }
+        }
+        is SessionSyncStatus.Failed -> {
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = status.message,
+                color = AlertRed,
+                fontSize = 12.sp,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(
+                    onClick = onSyncClick,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = AccentAmber,
+                        contentColor = Color.Black,
+                    ),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Tentar novamente", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                }
+                OutlinedButton(
+                    onClick = onExportClick,
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Exportar dados", fontSize = 13.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ExportExplanationDialog(
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = SurfaceDark,
+        title = {
+            Text(
+                text = "Exportar dados da sessão",
+                color = TextPrimary,
+                fontWeight = FontWeight.SemiBold,
+            )
+        },
+        text = {
+            Text(
+                text = "Estes arquivos (.csv e .json) estão no formato interno do Vigília. " +
+                    "Eles servem para o suporte técnico analisar sessões que não conseguiram " +
+                    "sincronizar. Envie por WhatsApp ou e-mail para o suporte.",
+                color = TextSecondary,
+                fontSize = 14.sp,
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = AccentAmber,
+                    contentColor = Color.Black,
+                ),
+            ) {
+                Text("Exportar", fontWeight = FontWeight.SemiBold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancelar", color = TextSecondary)
+            }
+        },
+    )
 }
 
 @Composable
