@@ -10,10 +10,16 @@ import com.vigilia.app.data.remote.dto.TelemetryRecordDto
 import com.vigilia.app.domain.model.FatigueState
 import com.vigilia.app.domain.model.SessionSummary
 import io.github.jan.supabase.postgrest.from
+import io.github.jan.supabase.postgrest.query.Columns
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
 import org.json.JSONObject
 import java.io.File
+
+@Serializable
+private data class RemoteSessionIdRow(@SerialName("id") val id: String)
 
 /** Syncs completed local sessions to the Supabase cloud. */
 class SyncRepository(private val context: Context) {
@@ -98,6 +104,38 @@ class SyncRepository(private val context: Context) {
     fun isSessionSynced(sessionId: String): Boolean {
         val folder = File(File(context.filesDir, "sessions"), sessionId)
         return File(folder, ".synced").exists()
+    }
+
+    /**
+     * Writes the `.synced` marker for a session that is known to exist remotely.
+     * Used as a self-heal when the marker was lost (crash between upsert and marker
+     * write) but the row is present in Supabase — avoids re-uploading everything.
+     */
+    fun markSessionSynced(sessionId: String) {
+        val folder = File(File(context.filesDir, "sessions"), sessionId)
+        if (folder.exists()) {
+            runCatching { File(folder, ".synced").createNewFile() }
+        }
+    }
+
+    /**
+     * Fetches the set of session IDs that actually exist for the current user in Supabase.
+     * Used by the History screen to reconcile local `.synced` markers with reality —
+     * catches both false positives (marker exists, row was deleted) and false negatives
+     * (row exists remotely, marker lost). Fails gracefully if offline / not authenticated;
+     * caller should fall back to `isSessionSynced()` on failure.
+     */
+    suspend fun getRemoteSyncedSessionIds(): Result<Set<String>> = runCatching {
+        if (!isOnline()) error("Sem conexão")
+        val userId = authRepository.refreshAndGetUserId()
+            ?: error("Not logged in — session expired or user signed out")
+        SupabaseClient.client.from("sessions")
+            .select(columns = Columns.list("id")) {
+                filter { eq("user_id", userId) }
+            }
+            .decodeList<RemoteSessionIdRow>()
+            .map { it.id }
+            .toSet()
     }
 
     /**

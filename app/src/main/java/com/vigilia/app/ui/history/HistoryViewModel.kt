@@ -59,19 +59,44 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /**
-     * Loads sessions and (re)builds the per-session sync status map by checking the
-     * `.synced` marker on disk. Statuses currently in `Syncing` are preserved so a
-     * refresh mid-upload doesn't reset the spinner.
+     * Loads sessions and (re)builds the per-session sync status map. Cross-checks the
+     * local `.synced` marker with what's actually in Supabase, so the UI reflects the
+     * truth in both directions:
+     *  - marker present but row missing remotely → Pending (backend lost it, retry)
+     *  - marker absent but row present remotely → Synced + write marker (self-heal)
+     * If the remote query fails (offline / auth error), falls back to the local marker
+     * only — no regression from the previous behavior.
+     *
+     * Statuses currently in `Syncing` are preserved so a refresh mid-upload doesn't
+     * reset the spinner.
      */
     fun loadSessions() {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
             val sessions = repository.getSessions()
             val previous = _uiState.value.syncStatuses
+            val remoteIds = syncRepository.getRemoteSyncedSessionIds().getOrNull()
+
             val statuses = sessions.associate { session ->
                 val id = session.sessionId
                 val newStatus: SessionSyncStatus = when {
                     previous[id] is SessionSyncStatus.Syncing -> SessionSyncStatus.Syncing
+                    remoteIds != null -> {
+                        val inRemote = id in remoteIds
+                        val localMarker = syncRepository.isSessionSynced(id)
+                        when {
+                            inRemote && !localMarker -> {
+                                // Self-heal: row exists but marker was lost (crash between
+                                // upsert and createNewFile). Write marker so future loads
+                                // skip the remote check for this one.
+                                syncRepository.markSessionSynced(id)
+                                SessionSyncStatus.Synced
+                            }
+                            inRemote -> SessionSyncStatus.Synced
+                            else -> previous[id] ?: SessionSyncStatus.Pending
+                        }
+                    }
+                    // Remote query failed — fall back to local marker only.
                     syncRepository.isSessionSynced(id) -> SessionSyncStatus.Synced
                     else -> previous[id] ?: SessionSyncStatus.Pending
                 }
