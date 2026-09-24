@@ -126,7 +126,10 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
             val result = syncRepository.syncSingleSession(sessionId)
             val newStatus: SessionSyncStatus = result.fold(
                 onSuccess = { SessionSyncStatus.Synced },
-                onFailure = { SessionSyncStatus.Failed(it.message ?: "Erro desconhecido") },
+                onFailure = { e ->
+                    Log.e("HistoryViewModel", "Sync failed", e)
+                    SessionSyncStatus.Failed("Falha ao sincronizar. Tente novamente.")
+                },
             )
             _uiState.update { state ->
                 state.copy(syncStatuses = state.syncStatuses + (sessionId to newStatus))

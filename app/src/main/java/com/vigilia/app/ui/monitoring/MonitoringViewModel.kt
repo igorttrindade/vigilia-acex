@@ -212,12 +212,16 @@ class MonitoringViewModel : ViewModel() {
                 val syncResult = SyncRepository(appContext).syncSingleSession(id)
                 syncResult.fold(
                     onSuccess = { SessionEndState.Success },
-                    onFailure = { SessionEndState.Failed(it.message ?: "Erro desconhecido") },
+                    onFailure = { e ->
+                        Log.e("MonitoringViewModel", "Sync failed", e)
+                        SessionEndState.Failed("Não foi possível sincronizar. Tente novamente pelo Histórico.")
+                    },
                 )
             } catch (_: TimeoutCancellationException) {
                 SessionEndState.Failed("Demorou demais para finalizar a sessão.")
             } catch (e: Exception) {
-                SessionEndState.Failed(e.message ?: "Erro inesperado")
+                Log.e("MonitoringViewModel", "Session end flow failed", e)
+                SessionEndState.Failed("Ocorreu um erro inesperado. Tente novamente pelo Histórico.")
             }
             _sessionEndState.value = outcome
         }
