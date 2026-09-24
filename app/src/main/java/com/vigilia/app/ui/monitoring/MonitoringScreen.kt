@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
@@ -169,9 +170,59 @@ fun MonitoringScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MonitoringOverlay(uiState: MonitoringUiState) {
     val assessment = uiState.assessment
+    var showInfoSheet by remember { mutableStateOf(false) }
+
+    if (showInfoSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showInfoSheet = false },
+            containerColor = SurfaceDark,
+        ) {
+            Column(
+                modifier = Modifier
+                    .padding(horizontal = 24.dp, vertical = 8.dp)
+                    .padding(bottom = 32.dp),
+            ) {
+                Text(
+                    text = "O que é o Score de Fadiga?",
+                    color = TextPrimary,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "Um número de 0 a 100 que mede sinais de cansaço captados pela câmera frontal do celular.",
+                    color = TextSecondary,
+                    fontSize = 14.sp,
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "O que é medido:",
+                    color = TextPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(8.dp))
+                InfoBullet("Fechamento dos olhos", "Quanto tempo os olhos ficaram fechados (PERCLOS)")
+                InfoBullet("Taxa de piscadas", "Piscadas acima ou abaixo do ritmo saudável")
+                InfoBullet("Bocejos", "Boca aberta por mais de 1,5 segundo")
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = "Faixas de fadiga:",
+                    color = TextPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(8.dp))
+                ScoreBandRow(color = NormalGreen, band = "0 – 50", label = "Normal")
+                ScoreBandRow(color = AccentAmber, band = "50 – 70", label = "Atenção")
+                ScoreBandRow(color = AlertRed, band = "70 – 100", label = "Fadigado")
+            }
+        }
+    }
 
     var dismissedAtMs by rememberSaveable { mutableLongStateOf(0L) }
     var tick by remember { mutableLongStateOf(0L) }
@@ -197,7 +248,26 @@ fun MonitoringOverlay(uiState: MonitoringUiState) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             StatePill(state = assessment?.fatigueState ?: FatigueState.NO_FACE)
-            ScoreIndicator(score = assessment?.score ?: 0f, state = assessment?.fatigueState ?: FatigueState.NO_FACE)
+            Column(horizontalAlignment = Alignment.End) {
+                ScoreIndicator(score = assessment?.score ?: 0f, state = assessment?.fatigueState ?: FatigueState.NO_FACE)
+                TextButton(
+                    onClick = { showInfoSheet = true },
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                ) {
+                    Text(
+                        text = "Nível de fadiga",
+                        color = TextSecondary,
+                        fontSize = 9.sp,
+                    )
+                    Spacer(Modifier.width(3.dp))
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = "O que é isso?",
+                        tint = TextSecondary,
+                        modifier = Modifier.size(11.dp),
+                    )
+                }
+            }
         }
 
         if (assessment?.fatigueState == FatigueState.CALIBRATING) {
@@ -673,6 +743,51 @@ private fun ResultContent(
         modifier = Modifier.fillMaxWidth(),
     ) {
         Text("Continuar", fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+private fun InfoBullet(title: String, description: String) {
+    Row(
+        modifier = Modifier.padding(vertical = 4.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Box(
+            modifier = Modifier
+                .padding(top = 6.dp)
+                .size(5.dp)
+                .background(AccentAmber, CircleShape)
+        )
+        Spacer(Modifier.width(10.dp))
+        Column {
+            Text(text = title, color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Text(text = description, color = TextSecondary, fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
+private fun ScoreBandRow(color: Color, band: String, label: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(12.dp)
+                .background(color, CircleShape)
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text = band,
+            color = TextPrimary,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.width(72.dp),
+        )
+        Text(text = label, color = color, fontSize = 13.sp, fontWeight = FontWeight.Bold)
     }
 }
 

@@ -18,6 +18,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -201,49 +202,121 @@ fun HistoryContent(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun StatsCard(sessions: List<SessionSummary>, modifier: Modifier = Modifier) {
     val totalAlerts = sessions.sumOf { it.totalAlerts }
     val avgScore = if (sessions.isNotEmpty()) sessions.map { it.averageScore }.average().toFloat() else 0f
+    var showInfoSheet by remember { mutableStateOf(false) }
+
+    if (showInfoSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showInfoSheet = false },
+            containerColor = SurfaceDark,
+        ) {
+            Column(
+                modifier = Modifier
+                    .padding(horizontal = 24.dp, vertical = 8.dp)
+                    .padding(bottom = 32.dp),
+            ) {
+                Text(
+                    text = "Entendendo as métricas",
+                    color = TextPrimary,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(16.dp))
+                MetricExplanation(
+                    title = "Score de Fadiga (0–100)",
+                    description = "Mede sinais de cansaço captados pela câmera — fechamento dos olhos, piscadas e bocejos.",
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    ScoreBandChip(color = NormalGreen, band = "0–50", label = "Normal")
+                    ScoreBandChip(color = AccentAmber, band = "50–70", label = "Atenção")
+                    ScoreBandChip(color = AlertRed, band = "70–100", label = "Fadigado")
+                }
+                Spacer(Modifier.height(16.dp))
+                MetricExplanation(
+                    title = "Score Médio",
+                    description = "Média do nível de fadiga ao longo de toda a sessão.",
+                )
+                Spacer(Modifier.height(12.dp))
+                MetricExplanation(
+                    title = "Pico",
+                    description = "Maior nível de fadiga atingido em qualquer momento da sessão.",
+                )
+            }
+        }
+    }
 
     Surface(
         color = SurfaceDark,
         shape = RoundedCornerShape(16.dp),
         modifier = modifier.fillMaxWidth(),
     ) {
-        Row(
-            modifier = Modifier.padding(20.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            StatItem(label = "Sessões", value = sessions.size.toString())
-            Box(
+        Box {
+            Row(
+                modifier = Modifier.padding(20.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                StatItem(label = "Sessões", value = sessions.size.toString())
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(36.dp)
+                        .background(TextSecondary.copy(alpha = 0.2f))
+                )
+                StatItem(
+                    label = "Score Médio",
+                    value = "%.0f".format(avgScore),
+                    subtitle = "Média de fadiga das sessões",
+                )
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(36.dp)
+                        .background(TextSecondary.copy(alpha = 0.2f))
+                )
+                StatItem(
+                    label = "Alertas",
+                    value = totalAlerts.toString(),
+                    valueColor = if (totalAlerts > 0) AlertRed else TextPrimary,
+                )
+            }
+            IconButton(
+                onClick = { showInfoSheet = true },
                 modifier = Modifier
-                    .width(1.dp)
-                    .height(36.dp)
-                    .background(TextSecondary.copy(alpha = 0.2f))
-            )
-            StatItem(label = "Score Médio", value = "%.0f".format(avgScore))
-            Box(
-                modifier = Modifier
-                    .width(1.dp)
-                    .height(36.dp)
-                    .background(TextSecondary.copy(alpha = 0.2f))
-            )
-            StatItem(
-                label = "Alertas",
-                value = totalAlerts.toString(),
-                valueColor = if (totalAlerts > 0) AlertRed else TextPrimary,
-            )
+                    .align(Alignment.TopEnd)
+                    .size(36.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Info,
+                    contentDescription = "Entender as métricas",
+                    tint = TextSecondary.copy(alpha = 0.5f),
+                    modifier = Modifier.size(16.dp),
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun StatItem(label: String, value: String, valueColor: Color = TextPrimary) {
+private fun StatItem(label: String, value: String, valueColor: Color = TextPrimary, subtitle: String? = null) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(text = value, color = valueColor, fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Text(text = label, color = TextSecondary, fontSize = 11.sp)
+        if (subtitle != null) {
+            Text(
+                text = subtitle,
+                color = TextSecondary.copy(alpha = 0.6f),
+                fontSize = 9.sp,
+            )
+        }
     }
 }
 
@@ -325,6 +398,12 @@ fun SessionCard(
                 Spacer(modifier = Modifier.height(12.dp))
 
                 // Score progress bar
+                Text(
+                    text = "Score Médio · média de fadiga da sessão",
+                    color = TextSecondary,
+                    fontSize = 10.sp,
+                )
+                Spacer(modifier = Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     LinearProgressIndicator(
                         progress = { (session.averageScore / 100f).coerceIn(0f, 1f) },
@@ -341,6 +420,27 @@ fun SessionCard(
                         color = stateColor,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold,
+                    )
+                }
+
+                val peakColor = when {
+                    session.peakScore >= 70f -> AlertRed
+                    session.peakScore >= 50f -> AccentAmber
+                    else -> NormalGreen
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "Pico: ${"%.0f".format(session.peakScore)}",
+                        color = peakColor,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "· maior nível de fadiga atingido",
+                        color = TextSecondary,
+                        fontSize = 11.sp,
                     )
                 }
 
@@ -568,6 +668,31 @@ private fun formatDuration(millis: Long): String {
         hours > 0 -> "${hours}h ${minutes}min"
         minutes > 0 -> "${minutes}min ${seconds}s"
         else -> "${seconds}s"
+    }
+}
+
+@Composable
+private fun MetricExplanation(title: String, description: String) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(text = title, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(2.dp))
+        Text(text = description, color = TextSecondary, fontSize = 13.sp)
+    }
+}
+
+@Composable
+private fun ScoreBandChip(color: Color, band: String, label: String) {
+    Surface(
+        color = color.copy(alpha = 0.15f),
+        shape = RoundedCornerShape(8.dp),
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+        ) {
+            Text(text = band, color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Text(text = label, color = TextPrimary, fontSize = 10.sp)
+        }
     }
 }
 
