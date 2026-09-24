@@ -58,7 +58,7 @@ class SessionRepositoryTest {
         File(session1, "session_summary.json").writeText(summary1)
         File(session2, "session_summary.json").writeText(summary2)
         
-        val sessions = repository.getSessions()
+        val sessions = repository.getSessions("test-user")
         
         assertEquals(2, sessions.size)
         assertEquals("session2", sessions[0].sessionId) // Newest first (startTime 5000)
@@ -100,7 +100,7 @@ class SessionRepositoryTest {
         // of a truncated file that IS valid UTF-8 but not valid JSON.
         File(badSession, "session_summary.json").writeText("{ this is not valid json")
 
-        val sessions = repository.getSessions()
+        val sessions = repository.getSessions("test-user")
 
         assertEquals(1, sessions.size)
         assertEquals("good-session", sessions[0].sessionId)

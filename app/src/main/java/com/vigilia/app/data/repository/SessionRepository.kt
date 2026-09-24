@@ -52,7 +52,7 @@ class SessionRepository private constructor(
      *
      * @return A list of [SessionSummary] objects.
      */
-    suspend fun getSessions(): List<SessionSummary> = withContext(Dispatchers.IO) {
+    suspend fun getSessions(userId: String): List<SessionSummary> = withContext(Dispatchers.IO) {
         if (!baseDir.exists() || !baseDir.isDirectory) {
             return@withContext emptyList<SessionSummary>()
         }
@@ -66,13 +66,23 @@ class SessionRepository private constructor(
             // kill mid-write, permission denied). Without this, a single bad folder crashes
             // the entire HistoryScreen load.
             try {
-                parseSummaryJson(summaryFile.readText())?.let { summaries.add(it) }
+                parseSummaryJson(summaryFile.readText())
+                    // Sessions without userId were recorded before this fix — include them
+                    // only for the currently logged-in user so they're visible once more
+                    // before being cleared on the next logout.
+                    ?.takeIf { it.userId == null || it.userId == userId }
+                    ?.let { summaries.add(it) }
             } catch (e: Exception) {
                 Log.w("SessionRepository", "Skipping unreadable session ${sessionFolder.name}", e)
             }
         }
 
         summaries.sortedByDescending { it.startTime }
+    }
+
+    suspend fun clearSessions() = withContext(Dispatchers.IO) {
+        baseDir.listFiles()?.forEach { it.deleteRecursively() }
+        Log.d("SessionRepository", "All local sessions cleared")
     }
 
     suspend fun deleteOldSessions(daysToKeep: Int = 60) = withContext(Dispatchers.IO) {
@@ -207,6 +217,7 @@ class SessionRepository private constructor(
             val driverComment = obj.optString("driverComment", "").takeIf { it.isNotBlank() }
             SessionSummary(
                 sessionId = obj.getString("sessionId"),
+                userId = obj.optString("userId").ifBlank { null },
                 startTime = obj.getLong("startTime"),
                 endTime = obj.getLong("endTime"),
                 durationMs = obj.getLong("durationMs"),

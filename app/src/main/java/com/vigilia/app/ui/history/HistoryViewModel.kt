@@ -6,6 +6,7 @@ import android.util.Log
 import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.vigilia.app.data.repository.AuthRepository
 import com.vigilia.app.data.repository.SessionRepository
 import com.vigilia.app.data.repository.SyncRepository
 import com.vigilia.app.domain.model.SessionSummary
@@ -48,6 +49,7 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
 
     private val repository = SessionRepository(application)
     private val syncRepository = SyncRepository(application)
+    private val authRepository = AuthRepository()
     private val _uiState = MutableStateFlow(HistoryUiState())
     val uiState: StateFlow<HistoryUiState> = _uiState.asStateFlow()
 
@@ -73,7 +75,11 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
     fun loadSessions() {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
-            val sessions = repository.getSessions()
+            val userId = authRepository.currentUserId() ?: run {
+                _uiState.update { it.copy(isLoading = false, isEmpty = true) }
+                return@launch
+            }
+            val sessions = repository.getSessions(userId)
             val previous = _uiState.value.syncStatuses
             val remoteIds = syncRepository.getRemoteSyncedSessionIds().getOrNull()
 

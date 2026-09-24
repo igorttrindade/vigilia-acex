@@ -3,6 +3,7 @@ package com.vigilia.app.ui.history
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.vigilia.app.data.repository.AuthRepository
 import com.vigilia.app.data.repository.SessionRepository
 import com.vigilia.app.data.repository.SessionTelemetryPoint
 import com.vigilia.app.domain.model.SessionSummary
@@ -29,6 +30,7 @@ class SessionDetailViewModel(
 ) : AndroidViewModel(application) {
 
     private val repository = SessionRepository(application)
+    private val authRepository = AuthRepository()
     private val _uiState = MutableStateFlow(SessionDetailUiState())
     val uiState: StateFlow<SessionDetailUiState> = _uiState.asStateFlow()
 
@@ -39,7 +41,8 @@ class SessionDetailViewModel(
     private fun load() {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
-            val summary = repository.getSessions().firstOrNull { it.sessionId == sessionId }
+            val userId = authRepository.currentUserId() ?: ""
+            val summary = repository.getSessions(userId).firstOrNull { it.sessionId == sessionId }
             if (summary == null) {
                 _uiState.update { it.copy(isLoading = false, notFound = true) }
                 return@launch

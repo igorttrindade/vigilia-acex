@@ -43,6 +43,7 @@ class TelemetryWriter private constructor(
     private val writeMutex = Mutex()
 
     private var currentSessionId: String? = null
+    private var currentUserId: String? = null
     private var sessionFolder: File? = null
     private var csvFile: File? = null
 
@@ -65,7 +66,7 @@ class TelemetryWriter private constructor(
      *
      * @return The unique sessionId.
      */
-    suspend fun startSession(): String = withContext(Dispatchers.IO) {
+    suspend fun startSession(userId: String? = null): String = withContext(Dispatchers.IO) {
         // Guard-rail: previous session was not finalized (missed stopSession, crash, or a
         // service instance being reused across sessions). Write its summary now so the
         // orphan folder still shows up in history instead of being silently discarded.
@@ -92,6 +93,7 @@ class TelemetryWriter private constructor(
         file.writeText("sessionId,timestamp,score,state,eyeOpenness,blinkRate,isYawning,isFaceDetected,alertActive,latitude,longitude,speed,accelX,accelY,accelZ,gyroX,gyroY,gyroZ,perclos,perclosContribution,blinkContribution,yawnContribution,ambientLightLux,frameLuminance,lightingMode,headYawDegrees,headPitchDegrees\n")
 
         currentSessionId = sessionId
+        currentUserId = userId
         sessionFolder = folder
         csvFile = file
 
@@ -209,6 +211,7 @@ class TelemetryWriter private constructor(
 
         val summary = SessionSummary(
             sessionId = sessionId,
+            userId = currentUserId,
             startTime = startTimeMillis,
             endTime = endTimeMillis,
             durationMs = durationMs,
@@ -242,6 +245,7 @@ class TelemetryWriter private constructor(
 
         // Reset session state
         currentSessionId = null
+        currentUserId = null
         sessionFolder = null
         csvFile = null
 
@@ -251,6 +255,7 @@ class TelemetryWriter private constructor(
     private fun buildSummaryJson(s: SessionSummary): String {
         return JSONObject().apply {
             put("sessionId", s.sessionId)
+            put("userId", s.userId ?: JSONObject.NULL)
             put("startTime", s.startTime)
             put("endTime", s.endTime)
             put("durationMs", s.durationMs)

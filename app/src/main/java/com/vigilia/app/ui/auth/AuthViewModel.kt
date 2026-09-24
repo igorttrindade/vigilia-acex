@@ -1,9 +1,11 @@
 package com.vigilia.app.ui.auth
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.vigilia.app.data.repository.AuthRepository
 import com.vigilia.app.data.repository.ProfileRepository
+import com.vigilia.app.data.repository.SessionRepository
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -52,7 +54,7 @@ data class AuthUiState(
 )
 
 /** Manages email/password authentication state for [AuthScreen]. */
-class AuthViewModel : ViewModel() {
+class AuthViewModel(application: Application) : AndroidViewModel(application) {
 
     private val authRepository = AuthRepository()
     private val profileRepository = ProfileRepository()
@@ -318,6 +320,7 @@ class AuthViewModel : ViewModel() {
 
     fun signOut() {
         viewModelScope.launch {
+            SessionRepository(getApplication()).clearSessions()
             authRepository.signOut()
                 .onFailure { e ->
                     android.util.Log.w("AuthViewModel", "Sign out failed on server", e)

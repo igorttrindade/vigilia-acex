@@ -47,6 +47,7 @@ data class FatigueAssessment(
 
 data class SessionSummary(
     val sessionId: String,
+    val userId: String? = null,
     val startTime: Long,
     val endTime: Long,
     val durationMs: Long,

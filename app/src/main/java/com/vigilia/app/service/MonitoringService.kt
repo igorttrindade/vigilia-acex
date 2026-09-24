@@ -29,6 +29,7 @@ import androidx.lifecycle.LifecycleRegistry
 import com.google.android.gms.location.*
 import com.vigilia.app.MainActivity
 import com.vigilia.app.camera.CameraManager
+import com.vigilia.app.data.repository.AuthRepository
 import com.vigilia.app.data.telemetry.TelemetryWriter
 import com.vigilia.app.domain.model.FatigueAssessment
 import com.vigilia.app.domain.model.FatigueMetrics
@@ -207,7 +208,7 @@ class MonitoringService : Service(), LifecycleOwner {
             try {
                 acquireWakeLock()
                 toneGenerator = ToneGenerator(AudioManager.STREAM_ALARM, 100)
-                sessionId = telemetryWriter.startSession()
+                sessionId = telemetryWriter.startSession(AuthRepository().currentUserId())
                 lifecycleRegistry.currentState = Lifecycle.State.RESUMED
                 isProcessRunning = true
                 startupCompleted = true
