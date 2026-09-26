@@ -258,9 +258,11 @@ private fun StatsCard(sessions: List<SessionSummary>, modifier: Modifier = Modif
         shape = RoundedCornerShape(16.dp),
         modifier = modifier.fillMaxWidth(),
     ) {
-        Box {
+        Box(modifier = Modifier.fillMaxWidth()) {
             Row(
-                modifier = Modifier.padding(20.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
