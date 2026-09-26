@@ -109,7 +109,7 @@ fun TermsAcceptanceScreen(
         when (step) {
             TermsStep.TOS -> TermsCard(
                 title = "Termo de Uso",
-                versionLabel = "v${TermsConfig.TOS_CURRENT_VERSION}",
+                versionLabel = "v${TermsConfig.formatVersionForDisplay(TermsConfig.TOS_CURRENT_VERSION)}",
                 body = tosText,
                 acceptButtonLabel = "Li e aceito — continuar",
                 modifier = Modifier.weight(1f),
@@ -120,7 +120,7 @@ fun TermsAcceptanceScreen(
             )
             TermsStep.PRIVACY -> TermsCard(
                 title = "Política de Privacidade Geral",
-                versionLabel = "v${TermsConfig.PRIVACY_CURRENT_VERSION}",
+                versionLabel = "v${TermsConfig.formatVersionForDisplay(TermsConfig.PRIVACY_CURRENT_VERSION)}",
                 body = privacyText,
                 acceptButtonLabel = "Li e aceito",
                 modifier = Modifier.weight(1f),

@@ -297,7 +297,7 @@ fun VigiliaNavGraph(
                 composable(ROUTE_TERMS_VIEW) {
                     TermsViewerScreen(
                         title = "Termo de Uso",
-                        versionLabel = "Versão ${TermsConfig.TOS_CURRENT_VERSION}",
+                        versionLabel = "Versão ${TermsConfig.formatVersionForDisplay(TermsConfig.TOS_CURRENT_VERSION)}",
                         assetPath = TermsConfig.TOS_ASSET,
                         onBack = { navController.popBackStack() },
                     )
@@ -305,7 +305,7 @@ fun VigiliaNavGraph(
                 composable(ROUTE_PRIVACY_VIEW) {
                     TermsViewerScreen(
                         title = "Política de Privacidade",
-                        versionLabel = "Versão ${TermsConfig.PRIVACY_CURRENT_VERSION}",
+                        versionLabel = "Versão ${TermsConfig.formatVersionForDisplay(TermsConfig.PRIVACY_CURRENT_VERSION)}",
                         assetPath = TermsConfig.PRIVACY_ASSET,
                         onBack = { navController.popBackStack() },
                     )
