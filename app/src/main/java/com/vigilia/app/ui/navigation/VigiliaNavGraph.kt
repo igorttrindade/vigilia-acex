@@ -142,6 +142,19 @@ fun VigiliaNavGraph(
         }
     }
 
+    // Aceite de termos no fluxo LOGIN concluído com sucesso. Necessário porque
+    // quando o usuário já entra autenticado (isLoggedIn=true desde a init do
+    // AuthViewModel) e cai direto em ROUTE_TERMS_LOGIN via startDestination, nem
+    // isLoggedIn nem requiresTermsAcceptance transicionam ao aceitar — StateFlow
+    // não re-emite valor igual, então keying nesses booleans perderia o evento.
+    LaunchedEffect(authUiState.loginTermsAcceptedEpoch) {
+        if (authUiState.loginTermsAcceptedEpoch > 0L && currentRoute == ROUTE_TERMS_LOGIN) {
+            navController.navigate(Screen.Setup.route) {
+                popUpTo(0) { inclusive = true }
+            }
+        }
+    }
+
     Scaffold(
         bottomBar = {
             val authRoutes = setOf(

@@ -51,6 +51,12 @@ data class AuthUiState(
     // atualizar/aceitar termos (versão vigente diferente da gravada). O nav
     // observa essa flag pra ir para terms_login em vez de setup.
     val requiresTermsAcceptance: Boolean = false,
+    // Incrementado a cada completeTermsAcceptanceForLogin bem-sucedido. Serve
+    // como gatilho de navegação para o caso do usuário já entrar autenticado
+    // (isLoggedIn=true desde a init) e cair direto em terms_login via
+    // startDestination — nesse cenário nem isLoggedIn nem requiresTermsAcceptance
+    // transicionam ao aceitar, então keying nesses booleans perderia o evento.
+    val loginTermsAcceptedEpoch: Long = 0L,
 )
 
 /** Manages email/password authentication state for [AuthScreen]. */
@@ -247,6 +253,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                             isLoading = false,
                             isLoggedIn = true,
                             requiresTermsAcceptance = false,
+                            loginTermsAcceptedEpoch = it.loginTermsAcceptedEpoch + 1,
                         )
                     }
                 }
