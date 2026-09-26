@@ -26,6 +26,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.vigilia.app.ui.theme.*
 
+private enum class LogoutStep { NONE, DATA_WARNING, FINAL_CONFIRM }
+
 /**
  * Hub de configurações da conta: perfil, termos, política de privacidade,
  * histórico e logout. Substitui a antiga tab de Histórico na bottom bar.
@@ -38,7 +40,7 @@ fun OptionsScreen(
     onNavigateHistory: () -> Unit,
     onLogout: () -> Unit,
 ) {
-    var showLogoutConfirm by remember { mutableStateOf(false) }
+    var logoutStep by remember { mutableStateOf(LogoutStep.NONE) }
 
     Column(
         modifier = Modifier
@@ -100,7 +102,7 @@ fun OptionsScreen(
         Spacer(modifier = Modifier.height(32.dp))
 
         OutlinedButton(
-            onClick = { showLogoutConfirm = true },
+            onClick = { logoutStep = LogoutStep.DATA_WARNING },
             modifier = Modifier
                 .fillMaxWidth()
                 .height(52.dp),
@@ -131,13 +133,24 @@ fun OptionsScreen(
         Spacer(modifier = Modifier.height(32.dp))
     }
 
-    if (showLogoutConfirm) {
-        LogoutConfirmDialog(
+    when (logoutStep) {
+        LogoutStep.NONE -> Unit
+        LogoutStep.DATA_WARNING -> LogoutConfirmDialog(
+            title = "Ao sair, seu histórico será apagado",
+            body = "As sessões de monitoramento salvas neste aparelho (visíveis em Histórico) serão excluídas. Sessões já sincronizadas continuam disponíveis no servidor; sessões pendentes serão perdidas.",
+            confirmLabel = "Continuar",
+            onConfirm = { logoutStep = LogoutStep.FINAL_CONFIRM },
+            onDismiss = { logoutStep = LogoutStep.NONE },
+        )
+        LogoutStep.FINAL_CONFIRM -> LogoutConfirmDialog(
+            title = "Confirmar saída",
+            body = "Tem certeza que deseja sair? Você precisará entrar novamente com email e senha.",
+            confirmLabel = "Sair",
             onConfirm = {
-                showLogoutConfirm = false
+                logoutStep = LogoutStep.NONE
                 onLogout()
             },
-            onDismiss = { showLogoutConfirm = false },
+            onDismiss = { logoutStep = LogoutStep.NONE },
         )
     }
 }
@@ -206,6 +219,9 @@ private fun RowDivider() {
 
 @Composable
 private fun LogoutConfirmDialog(
+    title: String,
+    body: String,
+    confirmLabel: String,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -234,14 +250,14 @@ private fun LogoutConfirmDialog(
                 }
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
-                    text = "Sair da conta?",
+                    text = title,
                     color = TextPrimary,
                     fontSize = 18.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "Você precisará entrar novamente com seu email e senha na próxima vez que abrir o aplicativo.",
+                    text = body,
                     color = TextSecondary,
                     fontSize = 14.sp,
                     lineHeight = 20.sp,
@@ -271,7 +287,7 @@ private fun LogoutConfirmDialog(
                         shape = RoundedCornerShape(12.dp),
                     ) {
                         Text(
-                            text = "Sair",
+                            text = confirmLabel,
                             color = BackgroundDark,
                             fontWeight = FontWeight.Bold,
                         )
