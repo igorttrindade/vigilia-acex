@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Vigília** is an Android fatigue-monitoring app for drivers. It uses on-device face landmark detection (MediaPipe Face Landmarker) to estimate eye closure (PERCLOS), blink rate, yawns, and head orientation, and produces a fatigue score 0–100 with a hysteresis state machine (NORMAL → WARNING → FATIGUED). Sessions are persisted locally (CSV + JSON) and optionally synced to Supabase (Auth + Postgrest) via WorkManager. Alerts are played through the Ringtone API when the driver appears fatigued.
+**Vigília** is an Android fatigue-monitoring app for drivers. It uses on-device face landmark detection (MediaPipe Face Landmarker) to estimate eye closure (PERCLOS), blink rate, yawns, and head orientation, and produces a fatigue score 0–100 with a hysteresis state machine (NORMAL → WARNING → FATIGUED). Sessions are persisted locally (CSV + JSON) and optionally synced to Supabase (Auth + Postgrest) via WorkManager. Alerts are played as short `ToneGenerator` beeps on `STREAM_ALARM` when the driver appears fatigued.
 
 **compileSdk**: 37 | **targetSdk**: 34 | **minSdk**: 26 | **Kotlin**: 2.3.21 | **AGP**: 9.2.1 | **Compose BOM**: 2026.05.00 | **Java**: 17
 
@@ -90,8 +90,8 @@ Remote
    - Head yaw and pitch decomposed from the 4×4 facial transformation matrix (column-major, Y-X-Z Euler: `pitch=asin(-m[9])`, `yaw=atan2(m[8], m[10])`).
 5. **`FatigueMetrics`** is emitted for every frame (leftEyeOpen, rightEyeOpen, mouthOpen, isFaceDetected, timestamp, headYawDegrees, headPitchDegrees, frameLuminance).
 6. **Scoring** (`FatigueScorer.processFrame`) — see next section. The scorer reads the current `LightingMode` via a provider lambda and echoes `ambientLightLux` + `lightingMode` into `FatigueAssessment` for telemetry.
-7. **Alerts** (Ringtone, USAGE_ALARM, 3s clip, 8s cooldown for sustained FATIGUED).
-8. **Telemetry** — every 2 s writes a 25-column record to `session.csv`; on Stop, `session_summary.json` is generated.
+7. **Alerts** (`ToneGenerator` short pip on `STREAM_ALARM`, 8s cooldown for sustained FATIGUED).
+8. **Telemetry** — every 2 s writes a 27-column record to `session.csv`; on Stop, `session_summary.json` is generated (including the driver's post-session rating + comment when they're submitted).
 
 ## FatigueScorer — algorithm details
 
@@ -111,7 +111,7 @@ Constants live in the `companion object` of `FatigueScorer`. **These are the val
 
 **Design decision**: total weight is intentionally under 100 to preserve the invariant that FATIGUED (>70) requires a *combination* of signals, not any single one. PERCLOS alone maxes at 65 (below 70). Blink weight was lowered from 20 → 15 → 10 across successive tunings — focus-blink at the front camera runs 25-30/min naturally, keeping deviation near 1.0, so any higher weight pushes the baseline near WARNING for wide-awake users. Yawn weight was lowered from 25 → 15 because a single yawn (tier-2 signal in the automotive literature) was tipping stationary users into FATIGUED when combined with mild PERCLOS.
 
-Exponential smoothing: `smoothedScore = 0.2 * rawScore + 0.8 * prev` (`SMOOTHING_ALPHA = 0.2`). Convergence takes ~10-15 frames (~400-500 ms) after any raw drop — gentle enough that the score doesn't visibly "collapse" when the yawn contribution releases, while still following genuine multi-second trends.
+Exponential smoothing is **asymmetric**: `SMOOTHING_ALPHA = 0.2f` applies when `rawScore ≥ smoothedScore` (score going up), `SMOOTHING_ALPHA_DESCENT = 0.08f` when `rawScore < smoothedScore` (score coming down). The score rises at normal pace to catch the onset of a real fatigue event quickly, but drops ~2.5× slower so a momentary recovery (one open-eye frame, a brief look-away, a yawn ending) can't zero the alert and leave the driver with a false sense of safety. Convergence: ~10-15 frames on the rise, ~30-40 frames on the descent (commit `74685c2`).
 
 ### Closure contribution — progressive score for the two microsleep detectors
 
@@ -120,9 +120,11 @@ Exponential smoothing: `smoothedScore = 0.2 * rawScore + 0.8 * prev` (`SMOOTHING
 | Detector | Threshold to arm | WARNING at | FATIGUED at | Constants |
 |---|---|---|---|---|
 | Tight microsleep | first frame with `rawEyeClosed=true` (post-calibration) or `eyeOpenness < MICROSLEEP_PRECAL_THRESHOLD=0.20` (during CALIBRATING) | 3s continuous | 6s continuous | `MICROSLEEP_WARNING_MS = 3_000L`, `MICROSLEEP_FATIGUED_MS = 6_000L` |
-| Partial closure | first frame with `eyeOpenness < PARTIAL_CLOSURE_THRESHOLD=0.45` (absolute, uncalibrated) | 5s continuous | 8s continuous | `PARTIAL_CLOSURE_WARNING_MS = 5_000L`, `PARTIAL_CLOSURE_FATIGUED_MS = 8_000L` |
+| Partial closure | first frame with `eyeOpenness < PARTIAL_CLOSURE_THRESHOLD=0.45` (absolute, uncalibrated) | 3s continuous | 8s continuous | `PARTIAL_CLOSURE_WARNING_MS = 3_000L`, `PARTIAL_CLOSURE_FATIGUED_MS = 8_000L` |
 
-Each detector ramps its contribution linearly: 0 → `CLOSURE_CONTRIB_WARNING = 60f` across the pre-WARNING window, then `60 → CLOSURE_CONTRIB_FATIGUED = 85f` across the WARNING→FATIGUED window, capped at 85. When both timers release, the peak contribution is held and decays linearly to 0 over `CLOSURE_DECAY_MS = 3_000L`. Smoothing (α=0.2) turns both directions into a visibly gradual on-screen curve — the score no longer jump-cuts from ~14 to 60 at the alarm instant and then snaps back on recovery.
+Each detector ramps its contribution linearly: 0 → `CLOSURE_CONTRIB_WARNING = 60f` across the pre-WARNING window, then `60 → CLOSURE_CONTRIB_FATIGUED = 85f` across the WARNING→FATIGUED window, capped at 85. When both timers release, the peak contribution is held and decays linearly to 0 over `CLOSURE_DECAY_MS = 8_000L` (bumped from 3 s in commit `74685c2` so the on-screen score doesn't visibly "snap back" the instant eyelids pop open — pairs with the asymmetric smoothing above). Asymmetric smoothing (α=0.2 up, 0.08 down) turns both directions into a visibly gradual on-screen curve — the score no longer jump-cuts from ~14 to 60 at the alarm instant and then collapses on recovery.
+
+**Partial-closure WARNING at 3 s** (was 5 s in earlier builds; shortened in commit `257ad72`): field testing showed that drivers in real pre-sleep states hold their eyes at ~0.25-0.40 openness for 3-4 s stretches without ever hitting the tight `rawEyeClosed` threshold. 5 s was late enough that the first audible alert could land after the vehicle had already drifted a lane width.
 
 **Why the partial-closure detector exists (field-test motivation):** the tight microsleep detector needs `rawEyeClosed = true`, i.e. `eyeOpenness < eyeClosedThreshold` (~0.263 after calibration). Field test showed a driver's real eye closure produced MediaPipe blendshapes in the 0.23-0.42 band — mostly above the tight threshold, chaotic detection at the boundary, no sustained closure streak. The partial-closure detector uses an absolute threshold to catch this case. Gated on `!isLookingAway` so glances at mirror/panel don't fire.
 
@@ -154,8 +156,9 @@ Each detector ramps its contribution linearly: 0 → `CLOSURE_CONTRIB_WARNING = 
 ### Look-away detection (head orientation)
 When the driver checks mirrors / dashboard / side windows, MediaPipe's eye blendshapes inflate because eyelids look shorter in oblique perspective — those frames used to be counted as "closed" and drove false alerts. The scorer now pauses accumulation:
 
-- `LOOK_AWAY_YAW_DEGREES = 25f` — |yaw| beyond this → look-away.
+- `LOOK_AWAY_YAW_DEGREES = 45f` — |yaw| beyond this → look-away candidate. Widened from 25° (commit `194dc0b`) because drivers routinely glance at side mirrors in the 25-40° range while still monitoring the camera; the previous threshold was pausing PERCLOS accumulation during normal driving, hiding microsleeps that happened to coincide with a sidelong glance.
 - `LOOK_AWAY_PITCH_DEGREES_UP = 20f` and `LOOK_AWAY_PITCH_DEGREES_DOWN = 25f` (asymmetric — driver glances at dashboard).
+- `LOOK_AWAY_DEBOUNCE_MS = 150L` — look-away must persist 150 ms before buffers freeze (commit `194dc0b`). Without the debounce, a rapid flick of the head (checking the rearview, correcting a camera-pointing adjustment) could spike yaw past 45° for a single frame and immediately pause PERCLOS/blink accounting, leaving a stale window the next time the driver's eyes close. The yaw used in the comparison is `relativeYaw` (yaw minus the neutral baseline captured during calibration), so a driver whose head is naturally tilted to one side doesn't live in permanent look-away mode.
 
 While `isLookingAway` is true: `perclosWindow` doesn't receive `addLast()`; blink state machine is skipped; yawn timers reset. Buffers **still drain by age** so a long look-away naturally empties stale data. FSM state (NORMAL/WARNING/FATIGUED) is preserved — a brief head turn doesn't demote a legitimate alert.
 
@@ -258,7 +261,7 @@ Supabase columns `ambient_light_lux`, `frame_luminance`, `lighting_mode` exist o
 ### `startMonitoring()`
 1. Recreate `scorer = FatigueScorer(calibrationEnabled, lightingModeProvider = { lightingMonitor.mode.value }, ambientLuxProvider = { lastAmbientLux })` from scratch. `lightingMonitor.reset()`.
 2. `startForeground()`, `startLocationUpdates()`, `startSensorUpdates()` (registers accel, gyro, and `TYPE_LIGHT` when available).
-3. Launch on Main: `acquireWakeLock()` (2 h ceiling, safety only — released on Stop), preload ringtone, `telemetryWriter.startSession()` (guard-rail finalizes any orphaned previous session), set `isProcessRunning = true`, `cameraManager.startCamera(...)`.
+3. Launch on Main: `acquireWakeLock()` (2 h ceiling, safety only — released on Stop), initialize the `ToneGenerator` for alert pips, `telemetryWriter.startSession()` (guard-rail finalizes any orphaned previous session), set `isProcessRunning = true`, `cameraManager.startCamera(...)`.
 4. Inside the frame callback, before `scorer.processFrame(metrics)`: `lightingMonitor.update(lastAmbientLux, metrics.frameLuminance, metrics.timestampMs)`.
 5. If `lowLightAdaptationEnabled`, launch a `serviceScope` collector on `lightingMonitor.mode` that calls `cameraManager.applyLightingMode(mode)` on transitions (off the frame loop; cancelled on stop).
 
@@ -306,10 +309,22 @@ Session directory: `context.filesDir/sessions/{sessionId}/`
 
 Files:
 - `session.csv` — one row per 2 s window (27 columns): `sessionId,timestamp,score,state,eyeOpenness,blinkRate,isYawning,isFaceDetected,alertActive,latitude,longitude,speed,accelX,accelY,accelZ,gyroX,gyroY,gyroZ,perclos,perclosContribution,blinkContribution,yawnContribution,ambientLightLux,frameLuminance,lightingMode,headYawDegrees,headPitchDegrees`. Columns 19–22 are FatigueScorer sub-scores exposed for post-hoc diagnosis — they let you decompose the aggregated `score` and calibrate weights from real data. Columns 23–25 are the Fase-1 lighting context (see "Lighting adaptation"). Columns 26–27 are head orientation (yaw, pitch, degrees) — persisted so that ambiguous "head down vs. drowsy" cases can be classified from raw telemetry. Old CSVs (18/22/25 columns) are still parseable by `SyncRepository.parseCsvLine`; missing columns just come back as null.
-- `session_summary.json` — aggregated: `sessionId, startTime, endTime, durationMs, totalAlerts, dominantState, averageScore, peakScore`
-- `.synced` — empty marker written by `SyncRepository` after successful upload to Supabase
+- `session_summary.json` — aggregated: `sessionId, userId, startTime, endTime, durationMs, totalAlerts, dominantState, averageScore, peakScore, driverRating?, driverComment?`. `userId` is persisted so `SessionRepository.getSessions(userId)` can filter the local history per authenticated user — see "Per-user session isolation". `driverRating` (1–5) and `driverComment` (free text) come from the `SessionEndFlowDialog` on `MonitoringScreen` after the session stops; both are nullable (user may skip rating).
+- `.synced` — empty marker written by `SyncRepository` after successful upload to Supabase. Reconciled against the remote: see "Sync status reconciliation" below.
 
 `TelemetryWriter.writeMutex` (`kotlinx.coroutines.sync.Mutex`) protects both writeRecord and stopSession. `startSession()` includes a guard-rail: if a previous session was never explicitly stopped, it finalizes that summary first so orphan folders never accumulate.
+
+### Per-user session isolation
+Session folders live under a single shared `filesDir/sessions/` directory (no per-user subfolder — that would require moving data on user switch). Instead `SessionRepository.getSessions(userId)` filters each `session_summary.json` in runtime by its `userId` field. Added in commit `5d48ab8` to close a cross-user data exposure: if two accounts shared a device, the second one logging in would see the first one's history. Backward compat for legacy summaries without `userId` is pragmatic — those sessions are attributed to the currently-logged-in user (first logger wins). This is listed as a known limitation; properly resolving it would require either a migration prompt or deleting legacy sessions on first run, neither of which has been accepted as worth the UX cost.
+
+### Sync status reconciliation
+`HistoryViewModel` tracks each session's sync state as `Pending | Syncing | Synced | Failed` (surfaced in `HistoryScreen` with a per-row retry button). On every `loadSessions()` it reconciles the local `.synced` marker with the actual contents of the remote `sessions` table (fetched via `SyncRepository.getRemoteSyncedSessionIds(userId)`):
+- Local marker present + remote row present → `Synced` (steady state).
+- Local marker absent + remote row present → auto-heal: write the marker locally, present as `Synced`. Happens when the app was reinstalled/data-cleared but the user's Supabase account kept the uploads.
+- Local marker present + remote row absent → treat as `Pending` and allow retry. Happens when a developer manually deleted the Supabase row.
+- Local marker absent + remote row absent → `Pending`, retry button enabled.
+
+`OptionsScreen` also exposes a global "sync now" button that enqueues `SyncWorker` immediately via `WorkManager`.
 
 ## Supabase integration
 
@@ -331,20 +346,30 @@ Files:
 ## UI
 
 ### Navigation (`VigiliaNavGraph`)
-- Routes: `auth`, `forgot_password`, `reset_password`, `setup`, `monitoring`, `history`.
-- Start destination decided by `AuthRepository().isLoggedIn()` in `MainActivity`.
-- Bottom bar shown only outside the auth flow.
+- Routes: `auth`, `forgot_password`, `reset_password`, `terms_signup`, `terms_login`, `terms_permission`, `setup`, `monitoring`, `options`, `options/profile`, `options/terms`, `options/privacy`, `history`, `history/session/{sessionId}`.
+- Start destination decided by `AuthRepository().isLoggedIn()` in `MainActivity`. A logged-in user whose accepted-terms version doesn't match the current one is deflected into `terms_login` before reaching `setup`.
+- Bottom bar shown only outside the auth and terms-acceptance flows.
 - `ActiveMonitoringBanner` renders whenever `MonitoringService.currentAssessment != null` and the current route isn't auth-related.
 - Auth guard: `LaunchedEffect` observes `AuthUiState.isLoggedIn` and force-navigates back to `auth` with `popUpTo(0)` on logout.
 - Password reset deep link: `LaunchedEffect` reacts to `isPasswordResetDeepLink` state.
 
 ### Screens
-- **AuthScreen**: sign-in / sign-up toggle. Uses `android.util.Patterns.EMAIL_ADDRESS`; password ≥ 8 chars. Errors mapped to PT-BR messages ("E-mail ou senha incorretos", "Confirme seu e-mail antes de entrar", etc.). Sign-up creates a `profiles` row via `ProfileDto` upsert.
+- **AuthScreen**: sign-in / sign-up toggle. Uses `android.util.Patterns.EMAIL_ADDRESS`; password ≥ 8 chars. Errors mapped to PT-BR messages ("E-mail ou senha incorretos", "Confirme seu e-mail antes de entrar", etc.). Sign-up creates a `profiles` row via `ProfileDto` upsert. On a successful sign-in, if the stored accepted-terms version is stale, the user is sent to `TermsAcceptanceScreen(mode=LOGIN)` before `setup` — fix `8f260b1` resolved a bug where an already-authenticated user was stuck on this screen because the terms-reaccept state wasn't propagating.
 - **ForgotPasswordScreen**: sends reset email via Supabase, shows confirmation state.
 - **ResetPasswordScreen**: reached via deep link; calls `AuthRepository.updatePassword`.
-- **SetupScreen**: CAMERA and location permission launcher (`ActivityResultContracts.RequestMultiplePermissions`). Two toggles persisted through `ServiceController`: calibration and low-light adaptation. Start button enabled iff CAMERA granted. Logout via `AuthViewModel.signOut`.
-- **MonitoringScreen**: `AndroidView { PreviewView }` inside `Box`. `ServiceConnection` binds to `MonitoringService` to `attachPreview`/`detachPreview`. Toggle button start/stop calls `viewModel.startMonitoring/stopMonitoring`. Overlays: state pill, radial score gauge, calibration progress bar, positioning warning banner, and `LightingWarningBanner` when mode is LOW_LIGHT/DARK. `MonitoringViewModel` maintains `frameWindow` (rolling 60 s of face-detected flags) to trigger a "reposicione o rosto" warning when > 30 % of frames are NO_FACE; it also unpacks `assessment.lightingMode` (String) into the `LightingMode` enum via `runCatching { LightingMode.valueOf(...) }`. The `AndroidView` applies `Modifier.scale(PRIVACY_ZOOM_FACTOR = 1.4f)` and the parent `Box` uses `.clipToBounds()` so passengers behind/beside the driver don't appear on-screen. This is a UI-only crop — `ImageAnalysis` receives full frames unchanged, so MediaPipe, `pickDriverIndex`, and the scorer are unaffected. Tune the factor between 1.3-1.5 on-device if the driver appears cropped or a passenger still leaks in.
-- **HistoryScreen**: `LazyColumn` of `SessionSummary` items sorted newest-first. `SessionRepository.getSessions()` reloads on `Lifecycle.State.RESUMED` via `repeatOnLifecycle`. Export via `FileProvider` + `Intent.ACTION_SEND_MULTIPLE` (CSV + JSON).
+- **TermsAcceptanceScreen** (`ui/terms/TermsAcceptanceScreen.kt`): dedicated terms-of-service + privacy-policy acceptance flow. Three modes:
+  - `SIGNUP` — presented during account creation, both acceptances required before `profiles` is upserted.
+  - `LOGIN` — presented after sign-in when the stored accepted-terms version is older than the current embedded version.
+  - `PERMISSION` — presented when the user tries to grant a permission before accepting the terms; blocks the sensitive flow.
+  Documents (`terms.md`, `privacy.md`) are embedded in `app/src/main/assets/` and rendered by the custom `MarkdownText` composable (regex-based: headers, bold, italic, bullet lists). The accept button is **disabled until the user scrolls to the bottom** of each document, with a 150-px tolerance at the end so the button isn't held hostage by an awkward last line (commit `81568af`). Returns the two `Instant` values for ToS + Privacy to the caller.
+- **TermsViewerScreen** (`ui/options/TermsViewerScreen.kt`): read-only viewer for the same documents, reached from `OptionsScreen`. No accept button.
+- **SetupScreen**: CAMERA and location permission launcher (`ActivityResultContracts.RequestMultiplePermissions`). Two toggles persisted through `ServiceController`: calibration and low-light adaptation. Start button enabled iff CAMERA granted.
+- **MonitoringScreen**: `AndroidView { PreviewView }` inside `Box`. `ServiceConnection` binds to `MonitoringService` to `attachPreview`/`detachPreview`. Toggle button start/stop calls `viewModel.startMonitoring/stopMonitoring`. Overlays: state pill, radial score gauge, **semantic score label** (PT-BR text — "Normal", "Atenção", "Fadigado" — displayed alongside the 0–100 number so the driver has an immediate interpretation; commit `cfaa4a8`), calibration progress bar, positioning warning banner, and `LightingWarningBanner` when mode is LOW_LIGHT/DARK. `MonitoringViewModel` maintains `frameWindow` (rolling 60 s of face-detected flags) to trigger a "reposicione o rosto" warning when > 30 % of frames are NO_FACE; it also unpacks `assessment.lightingMode` (String) into the `LightingMode` enum via `runCatching { LightingMode.valueOf(...) }`. The `AndroidView` applies `Modifier.scale(PRIVACY_ZOOM_FACTOR = 2.016f)` and the parent `Box` uses `.clipToBounds()` so passengers behind/beside the driver don't appear on-screen. This is a UI-only crop — `ImageAnalysis` receives full frames unchanged, so MediaPipe, `pickDriverIndex`, and the scorer are unaffected. The factor was raised from 1.4 → 2.016 in two steps (commit `194dc0b`) after field testing with crew-cab trucks and SUVs where back-seat passengers were still leaking into the frame. If a driver complains of being cropped on an unusually wide-FoV device, tune down between 1.6-2.1.
+- **SessionEndFlowDialog** (inside `MonitoringScreen`): post-stop overlay with FSM `Idle → Syncing → (Success | Failed) → Rating → Idle`. Rating step collects 1-5 stars + optional free-text comment, persisted to `session_summary.json` (`driverRating`, `driverComment`) and uploaded with the session row. The user can skip rating (`skipRating()`), in which case the fields stay null. This is also the only user-visible signal that the Supabase upload actually completed — before this feature was added, upload was a silent `WorkManager` background op.
+- **OptionsScreen** (`ui/options/OptionsScreen.kt`): hub screen reached from the bottom bar. Shows the signed-in user's profile card (name/email from `ProfileScreen` composable), links to the read-only `TermsViewerScreen`s, exposes a "sync now" button that enqueues `SyncWorker` immediately, and offers logout. **Logout is a two-step confirmation** (commit `c3e52fb`): first dialog warns that local session history will be wiped from this device (because `onLogout` deletes `filesDir/sessions/`); second dialog is the final confirmation. The two-step pattern was adopted after field reports of users tapping logout by accident and losing uploaded-but-not-yet-reconciled session folders.
+- **ProfileScreen** (`ui/options/ProfileScreen.kt`): displays `profiles` row content for the authenticated user; auto-heals the row via `ProfileRepository` if it's missing.
+- **HistoryScreen**: `LazyColumn` of `SessionSummary` items sorted newest-first. `SessionRepository.getSessions(userId)` reloads on `Lifecycle.State.RESUMED` via `repeatOnLifecycle` **and is user-scoped** (see "Per-user session isolation"). Each row shows the per-session sync status (`Pending`/`Syncing`/`Synced`/`Failed`) with an inline retry button (see "Sync status reconciliation"). Tapping a row navigates to `SessionDetailScreen`. Export via `FileProvider` + `Intent.ACTION_SEND_MULTIPLE` (CSV + JSON).
+- **SessionDetailScreen** (`ui/history/SessionDetailScreen.kt`): drill-down for a single past session. Shows a `StatsCard` (centered-aligned per fix `2c34219`) with the summary numbers, and a score-over-time line chart (peak-preserving downsample to ≤600 points) with alert markers at every `alertActive=true` row — the downsample bucketing deduplicates consecutive alert flags into single dots.
 
 ### Theme
 `VigiliaTheme` — dark-only Material 3. Custom colors in `Color.kt` (BackgroundDark, SurfaceDark, AccentAmber, AlertRed, NormalGreen, TextPrimary, TextSecondary).
@@ -368,7 +393,7 @@ Manifest highlights:
 ## Testing
 
 Unit tests (`app/src/test/`):
-- **FatigueScorerTest** — 54 tests: PERCLOS calc, blink detection, yawn (1.5 s trigger), NORMAL↔WARNING↔FATIGUED hysteresis, reset, calibration stabilization + tolerance + hard cap, consecutive-session score integrity, look-away not inflating PERCLOS, look-away preserving buffer, PERCLOS-alone can't promote to FATIGUED, NO_FACE grace, post-calibration perclosWindow seeding, five microsleep safety nets (pre-calibration with threshold 0.20, through-NO_FACE, buffer preservation on recovery, raw-frame arm surviving MediaPipe dropout after a single closed frame, single-frame noise not surviving into NO_FACE), and the partial-closure detector (WARNING at 5s of eyeOpen<0.45, FATIGUED at 8s).
+- **FatigueScorerTest** — 54 tests: PERCLOS calc, blink detection, yawn (1.5 s trigger), NORMAL↔WARNING↔FATIGUED hysteresis, reset, calibration stabilization + tolerance + hard cap, consecutive-session score integrity, look-away not inflating PERCLOS, look-away preserving buffer, PERCLOS-alone can't promote to FATIGUED, NO_FACE grace, post-calibration perclosWindow seeding, five microsleep safety nets (pre-calibration with threshold 0.20, through-NO_FACE, buffer preservation on recovery, raw-frame arm surviving MediaPipe dropout after a single closed frame, single-frame noise not surviving into NO_FACE), and the partial-closure detector (WARNING at 3s of eyeOpen<0.45, FATIGUED at 8s).
 - **TelemetryWriterTest** — 3 tests: two consecutive sessions both persist summaries, `startSession` guard-rail finalizes unfinished previous session, single session write/stop.
 - **SessionRepositoryTest** — 2 tests: sessions sorted by startTime desc, folder path resolution.
 - **LightingMonitorTest** (`app/src/test/java/com/vigilia/app/lighting/`) — 11 tests: starts in NORMAL, single dark frame doesn't flip, sustained 2 s → DARK, asymmetric 3 s exit dwell, brief 1 s tunnel doesn't commit, null-lux classification, reset.
@@ -404,18 +429,21 @@ app/src/main/java/com/vigilia/app/
 │   ├── telemetry/
 │   │   └── TelemetryWriter.kt        # Local CSV/JSON + writeMutex
 │   ├── repository/
-│   │   ├── SessionRepository.kt      # Read past sessions
+│   │   ├── SessionRepository.kt      # Read past sessions, user-scoped filter
 │   │   ├── AuthRepository.kt         # Supabase Auth
-│   │   └── SyncRepository.kt         # Upload to Supabase (Postgrest)
+│   │   ├── ProfileRepository.kt      # profiles row auto-heal
+│   │   └── SyncRepository.kt         # Upload to Supabase + remote-synced-ids query
 │   └── remote/
 │       ├── SupabaseClient.kt         # Supabase-kt singleton
 │       └── dto/                      # ProfileDto, SessionSummaryDto, TelemetryRecordDto
 └── ui/
     ├── navigation/VigiliaNavGraph.kt
     ├── auth/{AuthScreen, AuthViewModel, ForgotPasswordScreen, ResetPasswordScreen}
+    ├── terms/{TermsAcceptanceScreen, MarkdownText}
     ├── setup/{SetupScreen, SetupViewModel}
-    ├── monitoring/{MonitoringScreen, MonitoringViewModel}
-    ├── history/{HistoryScreen, HistoryViewModel}
+    ├── monitoring/{MonitoringScreen, MonitoringViewModel, SessionEndFlowDialog}
+    ├── options/{OptionsScreen, ProfileScreen, TermsViewerScreen}
+    ├── history/{HistoryScreen, HistoryViewModel, SessionDetailScreen, SessionDetailViewModel}
     └── theme/{Theme, Color, Type}
 ```
 
@@ -437,7 +465,7 @@ app/src/main/java/com/vigilia/app/
 All tuning constants are in `FatigueScorer.kt`'s `companion object`. Common tweaks:
 
 - Increase `TRANSITION_NORMAL_TO_WARNING_MS` (currently 3000) to be less trigger-happy on WARNING.
-- Increase `LOOK_AWAY_YAW_DEGREES` (currently 25) if drivers legitimately turn further while still monitoring the phone camera.
+- Increase `LOOK_AWAY_YAW_DEGREES` (currently 45) if drivers legitimately turn further while still monitoring the phone camera. Decrease (with care) if the mount position is unusually face-on and 45° is pausing accumulation during legitimate mirror checks.
 - Increase `CALIBRATION_STABILIZATION_MS` (currently 800) if devices with fast MediaPipe init still catch too-early samples.
 - Note the score weights sum to 90 — this is intentional (see "Score weights"). Under 100 means the score never saturates from any two-signal combination alone, preserving the "FATIGUED requires PERCLOS + at least one secondary" invariant.
 - To retune Fase-1 lighting behavior, edit constants in `LightingMonitor.companion object` (thresholds, dwell) and `FaceAnalyzer.companion object` (`GAMMA_LOW_LIGHT`, `GAMMA_DARK`, `CLAHE_CLIP_LIMIT`, `CLAHE_TILE_SIZE`). Camera2 knobs live in `CameraManager.applyLightingMode`.
@@ -452,7 +480,7 @@ adb pull /data/data/com.vigilia.app/files/sessions/
 Log tags of interest:
 - `FaceAnalyzer` — per-frame blinks, EAR, jawOpen, yaw, pitch.
 - `FatigueScorer` — smoothed score, state, perclos, blinkRate, isYawning, lookAway.
-- `MonitoringService` — location, ringtone, WakeLock errors.
+- `MonitoringService` — location, ToneGenerator, WakeLock errors.
 - `SyncWorker` / `SyncRepository` — upload state.
 - `TelemetryWriter` — guard-rail trigger.
 
@@ -466,7 +494,7 @@ adb shell dumpsys power | grep vigilia
 - Analysis @ 640×480 (fallback closest higher then lower).
 - `KEEP_ONLY_LATEST` backpressure — frames dropped if MediaPipe falls behind.
 - Telemetry batched at 2 s intervals; MediaPipe `detect()` on a dedicated executor never touches Main.
-- Exponential smoothing (α=0.3) suppresses per-frame jitter.
+- Asymmetric exponential smoothing (α=0.2 going up, α=0.08 coming down) suppresses per-frame jitter without letting recovery mask persistent fatigue.
 - PERCLOS window uses an `ArrayDeque<FrameRecord>` drained by age each frame (O(k) per frame where k = expired frames — typically 0 or 1).
 
 ## Known limitations & scope-out items
@@ -476,6 +504,8 @@ adb shell dumpsys power | grep vigilia
 - **`isLookingAway` not surfaced to UI**: computed in the scorer but not part of `FatigueAssessment`. Adding a "Olhando ao lado" badge on `MonitoringScreen` is a small future improvement. Note: since `headYawDegrees` / `headPitchDegrees` are now persisted in telemetry (columns 26–27), look-away can be reconstructed post-hoc from the raw angles even without a UI flag.
 - **PT-BR only (scope decision, not a limitation)**: user-facing strings are inlined in Compose (`"Iniciar monitoramento"`, `"Fadigado"`, etc.). `strings.xml` is intentionally near-empty. Full i18n / localization is out of scope by design — the app targets Brazilian drivers only.
 - **MonitoringService / camera code lacks unit tests**: covered by smoke testing.
+- **Legacy session summaries without `userId`**: pre-`5d48ab8` summaries have no `userId` field. The runtime filter in `SessionRepository.getSessions(userId)` falls back to attributing them to the currently-logged-in user — pragmatic (first login after the fix inherits the history) but technically leaks pre-fix sessions to whichever account logs in first on a shared device. Not fixed because the proper remedy (prompt the user to claim or discard) is more UX surface area than the issue warrants in a single-driver product.
+- **Fase-1 CLAHE always runs when mode ≠ NORMAL**: the SetupScreen "adaptação em baixa luz" toggle only gates `CameraManager.applyLightingMode()`; preprocessing in `FaceAnalyzer.enhance()` is still gated purely on `shouldApplyClahe(mode)`. Disabling the toggle gives you Camera2 defaults but not pre-Fase-1 behavior end-to-end. Known limitation; untangling requires passing a second provider into `FaceAnalyzer`.
 
 ## History of decisions
 
@@ -486,6 +516,15 @@ Current state summary:
 - **PERCLOS window**: 30 s; WARNING→FATIGUED gate: score >70 sustained 4 s
 - **Eye-closed ratio**: 0.30 × p90 calibration baseline (PERCLOS-70 automotive standard), clamped to [0.18, 0.45]
 - **Calibration**: ≤10 s total (≤3 s stabilization gate + 7 s collection); `perclosWindow` seeded from calibration samples to avoid post-calibration score spike
+- **Asymmetric smoothing**: α=0.2 going up / α=0.08 coming down; `CLOSURE_DECAY_MS = 8_000L` so the microsleep contribution fades slowly after eyelids reopen
+- **Partial-closure detector**: WARNING at 3 s of `eyeOpenness < 0.45` (reduced from 5 s in commit `257ad72`); FATIGUED at 8 s
+- **Look-away**: |yaw| > 45° (widened from 25° after field testing) with 150 ms debounce; pitch asymmetric at +20°/-25°; comparisons use `relativeYaw` (yaw minus a neutral baseline captured during calibration)
+- **Privacy preview zoom**: `PRIVACY_ZOOM_FACTOR = 2.016f` on the Compose preview — UI-only crop, `ImageAnalysis` sees full frames
 - **LightingMonitor**: entry requires BOTH Y + lux (AND); exit uses Y alone ("hard to enter, easy to exit"); asymmetric dwell 2 s darker / 3 s lighter
+- **Per-user isolation**: `SessionRepository.getSessions(userId)` filters by `userId` persisted in `session_summary.json`; legacy summaries without `userId` fall to the current user (first-login-wins)
+- **Sync status**: per-session `Pending/Syncing/Synced/Failed` tracked in `HistoryViewModel`; reconciled against Supabase on each `loadSessions()` (auto-heal missing marker, retry orphaned marker)
+- **Session-end rating**: 1–5 stars + optional comment collected via `SessionEndFlowDialog` on Stop; persisted to `session_summary.json` and uploaded on `driver_rating` / `driver_comment` columns
+- **Terms acceptance**: scroll-to-end-plus-150px gate; three contexts (SIGNUP/LOGIN/PERMISSION); docs embedded in `assets/`; rendered by the regex-based `MarkdownText` composable — no markdown library dependency
+- **Logout**: two-step confirmation (history-loss warning → final confirm) because logout deletes `filesDir/sessions/`
 - **Release keystore**: `~/vigilia-release.jks`, SHA-256 `960a8bc1…` — back it up; losing it means all users must reinstall from scratch (see `docs/decisions.md` for `keytool` command)
 - **R8**: enabled for release; device smoke test mandatory before shipping any ProGuard rule change

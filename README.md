@@ -19,18 +19,24 @@ Sessões são persistidas localmente (CSV + JSON) e sincronizadas com Supabase (
 ## Funcionalidades
 
 - **Detecção facial on-device** — nenhum frame de câmera sai do dispositivo. Todo o processamento roda localmente com MediaPipe FaceLandmarker (modelo bundled como asset).
-- **Zoom de privacidade na preview** — a visualização exibida ao motorista é ampliada em 1.4x na UI para que passageiros de trás/lado não apareçam na tela e não se sintam gravados sem consentimento. A análise de fadiga continua vendo o frame completo (o zoom é puramente cosmético), então detecção do motorista, `pickDriverIndex` e scoring seguem inalterados.
-- **Score composto de fadiga** — combina PERCLOS (percentual de olhos fechados numa janela de 30 s), taxa de piscadas (janela de 60 s) e detecção de bocejos, com pesos 65/10/15 (PERCLOS/piscadas/bocejos, soma = 90) e suavização exponencial.
+- **Zoom de privacidade na preview** — a visualização exibida ao motorista é ampliada em ~2x na UI (fator exato: 2.016) para que passageiros de trás/lado não apareçam na tela e não se sintam gravados sem consentimento. A análise de fadiga continua vendo o frame completo (o zoom é puramente cosmético), então detecção do motorista, `pickDriverIndex` e scoring seguem inalterados.
+- **Score composto de fadiga** — combina PERCLOS (percentual de olhos fechados numa janela de 30 s), taxa de piscadas (janela de 60 s) e detecção de bocejos, com pesos 65/10/15 (PERCLOS/piscadas/bocejos, soma = 90) e suavização exponencial assimétrica (α = 0.2 na subida, 0.08 na descida — o score cai mais devagar do que sobe, pra que uma recuperação momentânea não zere o alerta).
+- **Legenda semântica do score** — além do número 0–100, o `MonitoringScreen` exibe o rótulo em PT-BR correspondente ao estado atual ("Normal", "Atenção", "Fadigado") para dar ao motorista interpretação imediata.
 - **Máquina de estados com histerese** — transições NORMAL ↔ WARNING ↔ FATIGUED exigem que o score sustente o limiar por 3–5 segundos, evitando falsos positivos em oscilações momentâneas.
 - **Calibração personalizada** — nos primeiros 10 s de cada sessão, o app mede a abertura natural dos olhos do motorista e ajusta o limiar de "olho fechado" (padrão PERCLOS-70).
-- **Detecção de olhar para o lado** — pausa o acúmulo de PERCLOS quando o motorista checa espelhos/painel (yaw > 25° ou pitch fora da faixa), evitando falsos alertas.
+- **Detecção de olhar para o lado** — pausa o acúmulo de PERCLOS quando o motorista checa espelhos/painel (|yaw| > 45° ou pitch fora da faixa). Debounce de 150 ms impede que um giro rápido de cabeça (olhar relâmpago para o retrovisor) congele os buffers por engano.
 - **Adaptação a baixa luz (Fase 1)** — máquina de estados NORMAL/LOW_LIGHT/DARK que ativa pré-processamento OpenCV (CLAHE + gamma), ajusta EV/FPS/scene-mode da câmera via Camera2Interop e amplia a tolerância de perda de face em DARK.
-- **Detector de olhos parcialmente fechados** — safety net paralelo ao microsono tradicional. Se o olho ficar abaixo de 45% de abertura (threshold absoluto, não calibrado) por 5 s contínuos → WARNING; 8 s → FATIGUED. Cobre o caso em que MediaPipe reporta closure "meia-boca" (blendshape 0.25-0.45) e o detector calibrado não engata.
+- **Detector de olhos parcialmente fechados** — safety net paralelo ao microsono tradicional. Se o olho ficar abaixo de 45% de abertura (threshold absoluto, não calibrado) por 3 s contínuos → WARNING; 8 s → FATIGUED. Cobre o caso em que MediaPipe reporta closure "meia-boca" (blendshape 0.25-0.45) e o detector calibrado não engata.
 - **Alertas sonoros** — bipe curto via `ToneGenerator` (STREAM_ALARM) na transição para WARNING/FATIGUED, com re-alerta a cada 8 s enquanto FATIGUED persistir. Contagem no histórico segue o modelo "1 evento auditivo = 1 count": escalação WARNING→FATIGUED toca som mas não conta como alerta novo; descer de FATIGUED→WARNING é silencioso (motorista está melhorando, não faz sentido re-alarmar).
+- **Overlay de encerramento com avaliação** — ao parar o monitoramento (botão da UI, notificação, ou swipe do recent apps), o `MonitoringScreen` abre o `SessionEndFlowDialog` com fluxo `Idle → Syncing → (Success | Failed) → Rating`. O motorista dá uma nota de 1 a 5 estrelas e pode adicionar um comentário livre; ambos são persistidos no `session_summary.json` e enviados nas colunas `driver_rating` / `driver_comment` da tabela `sessions`. O overlay também é o único ponto em que o usuário tem feedback explícito de que o upload da sessão foi (ou não) concluído.
 - **Serviço em foreground** — monitoramento continua mesmo com a tela desligada, com WakeLock de segurança limitado a 2 h.
 - **Sincronização com Supabase** — WorkManager envia sessões e telemetria para tabelas Postgres protegidas por RLS. Falhas usam backoff exponencial (30 s, até 3 tentativas).
-- **Histórico local com detalhamento** — todas as sessões ficam armazenadas em `filesDir/sessions/{uuid}/`. Tocando num item do histórico, o app abre uma tela de detalhe com gráfico de score ao longo da sessão (peak-preserving, downsample para até 600 pontos) e marcadores de alarme. Para tirar os CSVs do device: `adb pull /data/data/com.vigilia.app/files/sessions/`.
-- **Autenticação** — cadastro/login por e-mail e senha, com fluxo completo de "esqueci minha senha" via deep link.
+- **Sync manual + reconciliação remota** — na `HistoryScreen` cada sessão expõe status individual (`Pending` / `Syncing` / `Synced` / `Failed`) e botão de retry. Ao abrir o histórico, o `HistoryViewModel` consulta os IDs já presentes no Supabase e cruza com o marker local `.synced`: se o marker local sumiu mas o remoto existe, auto-cura escrevendo o marker; se o marker existe mas o remoto não, volta a sessão pra `Pending` e permite retry.
+- **Isolamento de sessões por usuário** — `SessionRepository.getSessions(userId)` filtra em runtime pelo `userId` persistido em cada `session_summary.json`. Sessões antigas (anteriores ao fix) sem `userId` ficam visíveis apenas ao usuário atualmente logado, migração sem fricção.
+- **Histórico local com detalhamento** — todas as sessões ficam armazenadas em `filesDir/sessions/{uuid}/`. Tocando num item do histórico, o app abre `SessionDetailScreen` com gráfico de score ao longo da sessão (peak-preserving, downsample para até 600 pontos) e marcadores de alarme. Para tirar os CSVs do device: `adb pull /data/data/com.vigilia.app/files/sessions/`.
+- **Autenticação** — cadastro/login por e-mail e senha, com fluxo completo de "esqueci minha senha" via deep link. O registro `profiles` tem auto-heal: se a linha sumir (exclusão manual no Supabase, falha de migração), o `ProfileRepository` recria no próximo login.
+- **Aceite de Termos de Uso e Política de Privacidade in-app** — fluxo dedicado (`TermsAcceptanceScreen`) com 3 contextos: `SIGNUP` (durante o cadastro), `LOGIN` (quando a versão dos termos muda e o usuário já logado precisa reaceitar) e `PERMISSION` (bloqueia o uso das permissões sensíveis até o aceite). O botão de aceite só é habilitado após o scroll chegar ao final do documento (com tolerância de 150 px). Documentos ficam em `assets/` e são renderizados pelo componente custom `MarkdownText` (regex-based: cabeçalhos, bold, italic, listas) — sem biblioteca de markdown extra.
+- **Hub de Opções** — o `OptionsScreen` concentra perfil do usuário, visualização read-only dos documentos aceitos (`TermsViewerScreen`), botão de sync manual (dispara enfileiramento imediato do `SyncWorker`) e **logout com confirmação dupla**: primeiro um aviso explícito de que o histórico local será perdido no device, depois um diálogo final de confirmação. Protege o usuário de perder dados por engano.
 
 ## Como funciona
 
@@ -120,7 +126,7 @@ Ao criar a conta, um registro é `upsert`ado em `profiles`:
 | `id` (uuid) | `3f2a8b4c-...` | UID do Supabase Auth |
 | `full_name` (text) | `João Silva` | Formulário de cadastro |
 
-Uma linha por usuário. Referenciada por `sessions.user_id` e `telemetry_records.user_id` via FK.
+Uma linha por usuário. Referenciada por `sessions.user_id` e `telemetry_records.user_id` via FK. O `ProfileRepository` tem auto-heal — se o registro sumir (deleção manual, falha de migração), ele é recriado silenciosamente no próximo login.
 
 ### 2. Início da sessão
 
@@ -236,6 +242,8 @@ Quando João toca em **Parar** (ou o serviço é destruído), o `TelemetryWriter
 | `dominant_state` | text | Estado mais frequente durante a sessão |
 | `average_score` | real | Média aritmética de todos os `score` da sessão |
 | `peak_score` | real | Score máximo atingido |
+| `driver_rating` | int4 | Avaliação do motorista pós-sessão (1–5 estrelas via overlay; nullable quando o usuário pula a avaliação) |
+| `driver_comment` | text | Comentário opcional do motorista (nullable) |
 
 **Linha resultante da viagem de João:**
 
@@ -249,6 +257,8 @@ total_alerts: 3
 dominant_state: NORMAL
 average_score: 21.4
 peak_score: 74.2
+driver_rating: 4
+driver_comment: "Cansei bastante no final, próxima paro antes."
 ```
 
 Com esse par de tabelas relacional, você consegue:
@@ -305,19 +315,21 @@ app/src/main/java/com/vigilia/app/
 │   ├── repository/              # SessionRepository, AuthRepository, SyncRepository
 │   └── remote/                  # SupabaseClient + DTOs (ProfileDto, SessionSummaryDto, TelemetryRecordDto)
 └── ui/
-    ├── navigation/              # VigiliaNavGraph
+    ├── navigation/              # VigiliaNavGraph (rotas auth, terms_*, options/*, setup, monitoring, history/session/{id})
     ├── auth/                    # AuthScreen, ForgotPasswordScreen, ResetPasswordScreen + ViewModel
+    ├── terms/                   # TermsAcceptanceScreen (SIGNUP/LOGIN/PERMISSION) + MarkdownText (renderização custom)
     ├── setup/                   # SetupScreen + SetupViewModel
-    ├── monitoring/              # MonitoringScreen + MonitoringViewModel
-    ├── history/                 # HistoryScreen + HistoryViewModel + SessionDetailScreen + SessionDetailViewModel
+    ├── monitoring/              # MonitoringScreen + MonitoringViewModel + SessionEndFlowDialog
+    ├── options/                 # OptionsScreen + ProfileScreen + TermsViewerScreen (viewers read-only de ToS/Privacy)
+    ├── history/                 # HistoryScreen + SessionDetailScreen + ViewModels (sync manual + reconciliação)
     └── theme/                   # Cores e tipografia Material 3
 ```
 
 ## Limitações conhecidas
 
-- **UI de gravação de vídeo** existe visualmente no `MonitoringScreen`, mas não está conectada a nenhum recorder.
 - **Seleção de motorista em cabine cheia** — `FaceLandmarker` detecta até 4 rostos e `FaceAnalyzer.pickDriverIndex` escolhe o motorista pela área do bbox sobre 5 landmarks centrais estáveis, com bias sticky pro rosto anterior enquanto sua área for ≥70% do maior. Passageiros que se inclinam pra frente não roubam mais a atenção do algoritmo. Edge case não tratado: passageiro com rosto exatamente do mesmo tamanho e posição do motorista (raro — criança no colo, etc.).
 - **`isLookingAway` não é exibido na UI** — computado no scorer, poderia virar um badge "Olhando ao lado" no `MonitoringScreen`.
+- **Sessões legadas sem `userId`** — o filtro de isolamento por usuário trata sessões antigas (anteriores ao fix `5d48ab8`) como se pertencessem ao usuário logado no momento. É pragmático pra evitar que o histórico "suma" na primeira execução pós-fix, mas significa que se dois usuários dividem o device, as sessões pré-fix ficam atribuídas a quem logar primeiro.
 - **Internacionalização** — strings da UI hard-coded em PT-BR. O `strings.xml` está praticamente vazio.
 - **Cobertura de testes assimétrica** — o núcleo algorítmico (scoring, lighting) tem cobertura sólida; o pipeline de câmera e integrações com o sistema Android são cobertos apenas por smoke test.
 - **Fase 1 (baixa luz)** — CLAHE continua rodando mesmo com o toggle "adaptação em baixa luz" desligado. Apenas a aplicação de Camera2Interop é gated. Contornar exige refactor separado.
